@@ -1,7 +1,7 @@
 /* Service Worker：アプリ本体をキャッシュしてオフラインでも動くようにする。
    キャッシュするのはアプリ自身のファイルのみ。外部への通信は行わない。 */
 
-const CACHE_NAME = "pdic-spell-test-v1";
+const CACHE_NAME = "pdic-spell-test-v2";
 const ASSETS = [
   "./",
   "./index.html",

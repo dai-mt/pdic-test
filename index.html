@@ -42,6 +42,7 @@
 
   <button id="btnGoSetup" class="btn primary big full">テストをはじめる</button>
   <button id="btnGoList" class="btn secondary big full">単語一覧・検索</button>
+  <button id="btnGoExport" class="btn secondary big full">エクスポート（.txt 書き出し）</button>
 
   <details class="card">
     <summary>テスト履歴</summary>
@@ -59,33 +60,45 @@
   </div>
 
   <div class="card">
-    <p class="hint">PDICでCSV形式（UTF-16）で出力した <b>.txt</b> ファイルを選択してください。</p>
     <p class="hint">取り込み先グループ：<b id="importGroupName"></b></p>
+    <p class="hint">PDICのCSV形式（UTF-16）の <b>.txt</b>、または同じカラム構成の <b>.xlsx</b>（1行目にヘッダー）を選択してください。<b>複数ファイルを同時に選べます</b>（それぞれ別の辞書ファイルとして登録されます）。</p>
     <label class="file-label">
-      <input type="file" id="fileInput" accept=".txt">
-      <span class="btn primary full file-btn">.txt ファイルを選択</span>
+      <input type="file" id="fileInput" accept=".txt,.xlsx" multiple>
+      <span class="btn primary full file-btn">ファイルを選択（.txt / .xlsx）</span>
     </label>
+    <details class="paste-box">
+      <summary>エクセルからコピー＆貼り付けで取り込む</summary>
+      <p class="hint">エクセルでセル範囲（ヘッダー行を含めてもOK）をコピーして、下の欄に貼り付けてください。1つの辞書ファイルとして取り込まれます。</p>
+      <textarea id="pasteInput" class="input-big paste-area" placeholder="ここに貼り付け"></textarea>
+      <button id="btnLoadPaste" class="btn secondary full">貼り付けた内容を読み込む</button>
+    </details>
     <div id="importError" class="error-box hidden"></div>
   </div>
 
   <div id="importPreview" class="hidden">
-    <div class="card">
-      <h3>読み込み内容の確認</h3>
-      <div id="importSummary"></div>
-      <div class="preview-scroll">
-        <table id="previewTable"></table>
-      </div>
-    </div>
-    <div class="card">
-      <label class="field-label" for="dictNameInput">辞書ファイル名（アプリ内での表示名）</label>
-      <input type="text" id="dictNameInput" class="input-big">
-      <div id="importModeBox" class="hidden">
-        <p class="hint warn">同じ名前の辞書がすでにあります。どうしますか？</p>
-        <label class="radio-line"><input type="radio" name="importMode" value="overwrite" checked> 上書きする（既存の単語を消して入れ替え）</label>
-        <label class="radio-line"><input type="radio" name="importMode" value="append"> 追加する（既存の単語に追記）</label>
-      </div>
-      <button id="btnDoImport" class="btn primary big full">この内容で取り込む</button>
-    </div>
+    <div id="importSources"></div>
+    <button id="btnDoImport" class="btn primary big full">この内容で取り込む</button>
+  </div>
+</section>
+
+<!-- ============ エクスポート画面 ============ -->
+<section id="screen-export" class="screen hidden">
+  <div class="topbar">
+    <button class="btn-back" data-back="home">← 戻る</button>
+    <h2>エクスポート</h2>
+  </div>
+
+  <div class="card">
+    <p class="hint">アプリ上で編集した最新の内容を、PDICのCSV形式（UTF-16・.txt）で書き出します。書き出したファイルはこのアプリで再インポートできます。</p>
+    <button id="btnExportGroup" class="btn primary big full">グループをまるごとエクスポート（zip）</button>
+    <p class="hint">zipを解凍すると、グループ名のフォルダの中に各辞書の .txt が入っています。</p>
+  </div>
+
+  <div class="card">
+    <h3>辞書ファイルを選んでエクスポート</h3>
+    <div id="exportDictList"></div>
+    <button id="btnExportSelected" class="btn primary full">選択した辞書をエクスポート</button>
+    <p class="hint">1つ選んだときは .txt、複数選んだときは zip でダウンロードされます。</p>
   </div>
 </section>
 
@@ -94,6 +107,32 @@
   <div class="topbar">
     <button class="btn-back" data-back="home">← 戻る</button>
     <h2>単語一覧・検索</h2>
+    <button id="btnSelectMode" class="btn small topbar-right">選択して一括変更</button>
+  </div>
+
+  <div id="bulkBar" class="card hidden">
+    <div class="bulk-head">
+      <b><span id="bulkCount">0</span> 語を選択中</b>
+      <button id="btnBulkAll" class="btn small">全選択</button>
+      <button id="btnBulkNone" class="btn small">全解除</button>
+    </div>
+    <div class="filter-row">
+      <span>レベルを</span><select id="bulkLevel"></select><span>に</span>
+      <button id="btnBulkLevel" class="btn small">変更</button>
+    </div>
+    <div class="filter-row">
+      <span>暗記必須（memory）を</span>
+      <select id="bulkMemory"><option value="1">1（必須）</option><option value="0">0（必須でない）</option></select>
+      <span>に</span>
+      <button id="btnBulkMemory" class="btn small">変更</button>
+    </div>
+    <div class="filter-row">
+      <span>modifyフラグを</span>
+      <select id="bulkModify"><option value="1">1（あり）</option><option value="0">0（なし）</option></select>
+      <span>に</span>
+      <button id="btnBulkModify" class="btn small">変更</button>
+    </div>
+    <p class="hint">レベル・memoryを変更した単語には、modifyフラグが自動で付きます。</p>
   </div>
 
   <div class="card">
@@ -203,6 +242,7 @@
 <div id="modalOverlay" class="modal-overlay hidden">
   <div class="modal">
     <div id="modalBody"></div>
+    <button id="btnEditWord" class="btn primary full hidden">この単語を編集する</button>
     <button id="btnCloseModal" class="btn secondary full">閉じる</button>
   </div>
 </div>

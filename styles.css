@@ -136,6 +136,40 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; vertica
 .file-label input[type="file"] { display: none; }
 .file-btn { display: block; text-align: center; }
 
+/* --- paste box --- */
+.paste-box { margin-top: 14px; }
+.paste-box summary { font-weight: 600; color: var(--primary-dark); cursor: pointer; padding: 6px 0; }
+.paste-area { min-height: 110px; margin-top: 6px; font-size: 0.9rem; resize: vertical; font-family: inherit; }
+
+/* --- import sources --- */
+.source-card h3 { overflow-wrap: anywhere; }
+.mode-select-line { margin-top: 8px; font-size: 0.92rem; display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+
+/* --- topbar right button --- */
+.topbar-right { margin-left: auto; }
+
+/* --- bulk bar --- */
+.bulk-head { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+.bulk-head b { flex: 1; }
+.word-row.selected { outline: 2px solid var(--primary); }
+.word-row .w-check { width: 20px; height: 20px; margin-right: 8px; flex-shrink: 0; }
+.word-row .w-headline { display: flex; align-items: center; }
+.word-row .w-headline .w-body { flex: 1; min-width: 0; }
+
+/* --- edit form --- */
+.edit-field { margin-bottom: 10px; }
+.edit-field label { display: block; font-size: 0.78rem; color: var(--muted); margin-bottom: 3px; }
+.edit-field input[type="text"], .edit-field textarea {
+  width: 100%; font-size: 0.95rem; padding: 9px;
+  border: 1px solid var(--border); border-radius: 10px; font-family: inherit;
+}
+.edit-field textarea { min-height: 70px; resize: vertical; }
+
+/* --- export --- */
+.export-row { display: flex; align-items: center; gap: 10px; padding: 10px 4px; border-bottom: 1px solid var(--border); }
+.export-row:last-child { border-bottom: none; }
+.export-row label { flex: 1; display: flex; align-items: center; gap: 10px; min-width: 0; }
+
 /* --- dict list (home) --- */
 .dict-list { margin-bottom: 4px; }
 .dict-row {

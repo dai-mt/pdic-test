@@ -88,7 +88,7 @@ function clear(node) {
   while (node.firstChild) node.removeChild(node.firstChild);
 }
 
-const SCREENS = ["home", "import", "list", "setup", "test", "result"];
+const SCREENS = ["home", "import", "export", "list", "setup", "test", "result"];
 
 function showScreen(name) {
   for (const s of SCREENS) {
@@ -297,7 +297,8 @@ function setupGroupHandlers() {
    ========================================================= */
 
 const PDIC_COLUMNS = ["word", "trans", "exp", "level", "memory", "modify", "pron", "filelink"];
-let importState = null; // { entries, fileName, skipped, warnings }
+// importSources: [{ label, defaultName, entries, warnings }]
+let importSources = [];
 
 function decodeUtf16(buffer) {
   const bytes = new Uint8Array(buffer);
@@ -325,7 +326,7 @@ function decodeUtf16(buffer) {
   return decoder.decode(bytes.subarray(offset));
 }
 
-function parseCSV(text) {
+function parseCSV(text, delimiter = ",") {
   const rows = [];
   let row = [];
   let field = "";
@@ -349,10 +350,11 @@ function parseCSV(text) {
       }
       continue;
     }
-    if (c === '"') {
+    if (c === '"' && field === "") {
+      // クォートはフィールドの先頭にある場合のみ「囲み」として扱う
       inQuotes = true;
       i++;
-    } else if (c === ",") {
+    } else if (c === delimiter) {
       row.push(field);
       field = "";
       i++;
@@ -442,139 +444,336 @@ function showImportError(msg) {
   const box = $("importError");
   box.textContent = msg;
   box.classList.remove("hidden");
-  $("importPreview").classList.add("hidden");
-  importState = null;
 }
 
-async function handleFileSelected(file) {
+function clearImportError() {
   $("importError").classList.add("hidden");
-  $("importPreview").classList.add("hidden");
-  if (!file) return;
-  if (!file.name.toLowerCase().endsWith(".txt")) {
-    showImportError("拡張子が .txt のファイルを選択してください。");
+  $("importError").textContent = "";
+}
+
+/* --- xlsx 読み込み（外部ライブラリなし：ブラウザ内蔵のzip解凍機能を使用） --- */
+
+async function unzipFile(buffer) {
+  const bytes = new Uint8Array(buffer);
+  const view = new DataView(buffer);
+  // 末尾から End of Central Directory を探す
+  let eocd = -1;
+  const minPos = Math.max(0, bytes.length - 22 - 65535);
+  for (let i = bytes.length - 22; i >= minPos; i--) {
+    if (view.getUint32(i, true) === 0x06054b50) {
+      eocd = i;
+      break;
+    }
+  }
+  if (eocd < 0) throw new Error("zip形式として読み取れません");
+  const count = view.getUint16(eocd + 10, true);
+  let off = view.getUint32(eocd + 16, true);
+  const files = new Map();
+  const utf8 = new TextDecoder("utf-8");
+  for (let n = 0; n < count; n++) {
+    if (view.getUint32(off, true) !== 0x02014b50) break;
+    const method = view.getUint16(off + 10, true);
+    const compSize = view.getUint32(off + 20, true);
+    const nameLen = view.getUint16(off + 28, true);
+    const extraLen = view.getUint16(off + 30, true);
+    const commentLen = view.getUint16(off + 32, true);
+    const localOff = view.getUint32(off + 42, true);
+    const name = utf8.decode(bytes.subarray(off + 46, off + 46 + nameLen));
+    files.set(name, { method, compSize, localOff });
+    off += 46 + nameLen + extraLen + commentLen;
+  }
+  async function read(name) {
+    const f = files.get(name);
+    if (!f) return null;
+    const nameLen = view.getUint16(f.localOff + 26, true);
+    const extraLen = view.getUint16(f.localOff + 28, true);
+    const start = f.localOff + 30 + nameLen + extraLen;
+    const data = bytes.subarray(start, start + f.compSize);
+    if (f.method === 0) return data;
+    if (f.method === 8) {
+      const ds = new DecompressionStream("deflate-raw");
+      const stream = new Blob([data]).stream().pipeThrough(ds);
+      return new Uint8Array(await new Response(stream).arrayBuffer());
+    }
+    throw new Error("未対応の圧縮形式です");
+  }
+  return { names: [...files.keys()], read };
+}
+
+function colRefToIndex(ref) {
+  // "BC12" → 列文字部分を 0始まりの列番号に変換
+  const letters = ref.replace(/\d+$/, "");
+  if (!letters) return -1;
+  let idx = 0;
+  for (const ch of letters) idx = idx * 26 + (ch.charCodeAt(0) - 64);
+  return idx - 1;
+}
+
+async function parseXlsx(buffer) {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("お使いのブラウザは xlsx の読み込みに対応していません。PDICのCSV形式（.txt）でお試しください。");
+  }
+  const zip = await unzipFile(buffer);
+  const utf8 = new TextDecoder("utf-8");
+  const readXml = async (name) => {
+    const data = await zip.read(name);
+    if (!data) return null;
+    return new DOMParser().parseFromString(utf8.decode(data), "application/xml");
+  };
+  // 最初のシートのパスを workbook.xml.rels から特定（だめなら sheet1.xml）
+  let sheetPath = null;
+  const wb = await readXml("xl/workbook.xml");
+  const rels = await readXml("xl/_rels/workbook.xml.rels");
+  if (wb && rels) {
+    const sheet = wb.getElementsByTagName("sheet")[0];
+    const rid = sheet ? sheet.getAttribute("r:id") : null;
+    if (rid) {
+      for (const rel of rels.getElementsByTagName("Relationship")) {
+        if (rel.getAttribute("Id") === rid) {
+          let t = rel.getAttribute("Target") || "";
+          sheetPath = t.startsWith("/") ? t.slice(1) : "xl/" + t.replace(/^\.\//, "");
+        }
+      }
+    }
+  }
+  if (!sheetPath || !zip.names.includes(sheetPath)) {
+    sheetPath = zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0];
+  }
+  if (!sheetPath) throw new Error("xlsxの中にワークシートが見つかりません");
+  // 共有文字列テーブル
+  const shared = [];
+  const ss = await readXml("xl/sharedStrings.xml");
+  if (ss) {
+    for (const si of ss.getElementsByTagName("si")) {
+      let s = "";
+      for (const t of si.getElementsByTagName("t")) s += t.textContent;
+      shared.push(s);
+    }
+  }
+  const sheetDoc = await readXml(sheetPath);
+  const rows = [];
+  for (const rowEl of sheetDoc.getElementsByTagName("row")) {
+    const row = [];
+    for (const c of rowEl.getElementsByTagName("c")) {
+      let colIdx = colRefToIndex(c.getAttribute("r") || "");
+      if (colIdx < 0) colIdx = row.length;
+      const t = c.getAttribute("t");
+      let val = "";
+      if (t === "s") {
+        const v = c.getElementsByTagName("v")[0];
+        val = v ? shared[parseInt(v.textContent, 10)] ?? "" : "";
+      } else if (t === "inlineStr") {
+        for (const tt of c.getElementsByTagName("t")) val += tt.textContent;
+      } else {
+        const v = c.getElementsByTagName("v")[0];
+        val = v ? v.textContent : "";
+      }
+      while (row.length < colIdx) row.push("");
+      row[colIdx] = val;
+    }
+    rows.push(row);
+  }
+  return rows.filter((r) => r.some((c) => c.trim() !== ""));
+}
+
+/* --- インポート：ファイル選択（複数可）と貼り付け --- */
+
+async function sourceFromFile(file) {
+  const lower = file.name.toLowerCase();
+  let rows;
+  if (lower.endsWith(".txt")) {
+    const text = decodeUtf16(await file.arrayBuffer());
+    if (text.includes("�")) {
+      throw new Error("UTF-16として正しく読み取れませんでした。PDICのCSV出力時に文字コードを「Unicode（UTF-16）」にしてください。");
+    }
+    const { rows: r, unterminatedQuote } = parseCSV(text);
+    if (unterminatedQuote) throw new Error("閉じられていないダブルクォート（\"）があります。");
+    rows = r;
+  } else if (lower.endsWith(".xlsx")) {
+    rows = await parseXlsx(await file.arrayBuffer());
+  } else {
+    throw new Error("拡張子が .txt または .xlsx のファイルを選択してください。");
+  }
+  if (rows.length === 0) throw new Error("データがありません。");
+  const { entries, warnings } = rowsToEntries(rows);
+  if (entries.length === 0) throw new Error("取り込める単語がありませんでした。見出語（word）列を確認してください。");
+  return {
+    label: file.name,
+    defaultName: file.name.replace(/\.(txt|xlsx)$/i, ""),
+    entries,
+    warnings,
+  };
+}
+
+async function handleFilesSelected(fileList) {
+  clearImportError();
+  const files = Array.from(fileList || []);
+  if (files.length === 0) return;
+  const errors = [];
+  const sources = [];
+  for (const f of files) {
+    try {
+      sources.push(await sourceFromFile(f));
+    } catch (e) {
+      errors.push(`${f.name}：${e.message}`);
+    }
+  }
+  if (errors.length > 0) {
+    showImportError("読み込めなかったファイルがあります。\n" + errors.join("\n"));
+  }
+  if (sources.length > 0) {
+    importSources = sources;
+    renderImportPreview();
+  } else {
+    $("importPreview").classList.add("hidden");
+    importSources = [];
+  }
+}
+
+function handlePasteLoad() {
+  clearImportError();
+  const text = $("pasteInput").value;
+  if (text.trim() === "") {
+    showImportError("貼り付け欄が空です。エクセルでセル範囲をコピーして貼り付けてください。");
     return;
   }
-  let text;
-  try {
-    const buf = await file.arrayBuffer();
-    text = decodeUtf16(buf);
-  } catch (e) {
-    showImportError("ファイルの読み込みに失敗しました：" + e.message);
-    return;
-  }
-  if (text.includes("�")) {
-    showImportError(
-      "ファイルを UTF-16 として正しく読み取れませんでした。\nPDICのCSV出力時に文字コードを「Unicode（UTF-16）」にして出力し直してください。"
-    );
-    return;
-  }
-  const { rows, unterminatedQuote } = parseCSV(text);
-  if (unterminatedQuote) {
-    showImportError("CSVの形式エラー：閉じられていないダブルクォート（\"）があります。ファイルの内容を確認してください。");
-    return;
-  }
-  if (rows.length === 0) {
-    showImportError("ファイルにデータがありません。");
+  const { rows, unterminatedQuote } = parseCSV(text, "\t");
+  if (unterminatedQuote || rows.length === 0) {
+    showImportError("貼り付けた内容を読み取れませんでした。エクセルからコピーした内容か確認してください。");
     return;
   }
   const { entries, warnings } = rowsToEntries(rows);
   if (entries.length === 0) {
-    showImportError("取り込める単語がありませんでした。見出語（word）列が空でないか確認してください。");
+    showImportError("取り込める単語がありませんでした。1列目（word）が空でないか確認してください。");
     return;
   }
-  importState = { entries, warnings, fileName: file.name };
+  const d = new Date();
+  importSources = [
+    {
+      label: "貼り付けた内容",
+      defaultName: `貼り付け ${d.getMonth() + 1}-${d.getDate()} ${d.getHours()}${String(d.getMinutes()).padStart(2, "0")}`,
+      entries,
+      warnings,
+    },
+  ];
   renderImportPreview();
 }
 
 function renderImportPreview() {
-  const { entries, warnings, fileName } = importState;
-
-  const summary = $("importSummary");
-  clear(summary);
-  summary.appendChild(el("p", { class: "import-summary-line", text: `ファイル名：${fileName}` }));
-  summary.appendChild(el("p", { class: "import-summary-line", text: `取り込み件数：${entries.length} 語` }));
-  summary.appendChild(
-    el("p", { class: "import-summary-line", text: `カラム：${PDIC_COLUMNS.join(", ")}` })
-  );
-  for (const w of warnings) {
-    summary.appendChild(el("p", { class: "import-summary-line hint warn", text: "⚠ " + w }));
-  }
-
-  const table = $("previewTable");
-  clear(table);
-  const headTr = el("tr");
-  for (const c of ["word", "trans", "level", "memory", "pron"]) {
-    headTr.appendChild(el("th", { text: c }));
-  }
-  table.appendChild(headTr);
-  for (const entry of entries.slice(0, 5)) {
-    const tr = el("tr");
-    tr.appendChild(el("td", { text: entry.word }));
-    tr.appendChild(el("td", { text: entry.trans.slice(0, 60) }));
-    tr.appendChild(el("td", { text: String(entry.level) }));
-    tr.appendChild(el("td", { text: String(entry.memory) }));
-    tr.appendChild(el("td", { text: entry.pron }));
-    table.appendChild(tr);
-  }
-
-  const defaultName = fileName.replace(/\.txt$/i, "");
-  $("dictNameInput").value = defaultName;
-  updateImportModeBox();
+  const box = $("importSources");
+  clear(box);
+  importSources.forEach((src, i) => {
+    const card = el("div", { class: "card source-card" });
+    card.appendChild(el("h3", { text: src.label }));
+    card.appendChild(el("p", { class: "import-summary-line", text: `取り込み件数：${src.entries.length} 語` }));
+    for (const w of src.warnings) {
+      card.appendChild(el("p", { class: "import-summary-line hint warn", text: "⚠ " + w }));
+    }
+    // 先頭5件のプレビュー
+    const scroll = el("div", { class: "preview-scroll" });
+    const table = el("table");
+    const headTr = el("tr");
+    for (const c of ["word", "trans", "level", "memory", "pron"]) headTr.appendChild(el("th", { text: c }));
+    table.appendChild(headTr);
+    for (const entry of src.entries.slice(0, 5)) {
+      const tr = el("tr");
+      tr.appendChild(el("td", { text: entry.word }));
+      tr.appendChild(el("td", { text: entry.trans.slice(0, 60) }));
+      tr.appendChild(el("td", { text: String(entry.level) }));
+      tr.appendChild(el("td", { text: String(entry.memory) }));
+      tr.appendChild(el("td", { text: entry.pron }));
+      table.appendChild(tr);
+    }
+    scroll.appendChild(table);
+    card.appendChild(scroll);
+    // 辞書名入力
+    card.appendChild(el("label", { class: "field-label", text: "辞書ファイル名（アプリ内での表示名）" }));
+    const nameInput = el("input", { type: "text", class: "input-big", "data-src": String(i) });
+    nameInput.value = src.defaultName;
+    card.appendChild(nameInput);
+    // 既存辞書と同名の場合のモード選択
+    const modeLine = el("div", { class: "mode-select-line hidden" }, [
+      el("span", { class: "hint warn", text: "同じ名前の辞書があります：" }),
+    ]);
+    const modeSel = el("select", { "data-srcmode": String(i) });
+    modeSel.appendChild(el("option", { value: "overwrite", text: "上書きする（入れ替え）" }));
+    modeSel.appendChild(el("option", { value: "append", text: "追加する（追記）" }));
+    modeLine.appendChild(modeSel);
+    card.appendChild(modeLine);
+    const updateMode = () => {
+      const exists = dictsCache.some((d) => d.name === nameInput.value.trim());
+      modeLine.classList.toggle("hidden", !exists);
+    };
+    nameInput.addEventListener("input", updateMode);
+    updateMode();
+    box.appendChild(card);
+  });
   $("importPreview").classList.remove("hidden");
 }
 
-function updateImportModeBox() {
-  const name = $("dictNameInput").value.trim();
-  const exists = dictsCache.some((d) => d.name === name);
-  $("importModeBox").classList.toggle("hidden", !exists);
+async function importOneSource(src, name, mode) {
+  const existing = dictsCache.find((d) => d.name === name);
+  const tx = db.transaction(["dicts", "words"], "readwrite");
+  const dictStore = tx.objectStore("dicts");
+  const wordStore = tx.objectStore("words");
+  let dictId;
+  let baseCount = 0;
+  if (existing) {
+    dictId = existing.id;
+    if (mode === "overwrite") {
+      const keys = await idb(wordStore.index("dictId").getAllKeys(dictId));
+      for (const k of keys) wordStore.delete(k);
+    } else {
+      baseCount = existing.wordCount || 0;
+    }
+  } else {
+    dictId = await idb(dictStore.add({ groupId: currentGroupId, name, wordCount: 0, importedAt: Date.now() }));
+  }
+  for (const entry of src.entries) {
+    wordStore.add({ dictId, ...entry });
+  }
+  const newCount = baseCount + src.entries.length;
+  const dictRec = existing
+    ? { ...existing, wordCount: newCount, importedAt: Date.now() }
+    : { id: dictId, groupId: currentGroupId, name, wordCount: newCount, importedAt: Date.now() };
+  dictStore.put(dictRec);
+  await txDone(tx);
 }
 
 async function doImport() {
-  if (!importState) return;
-  const name = $("dictNameInput").value.trim();
-  if (!name) {
-    alert("辞書ファイル名を入力してください。");
+  if (importSources.length === 0) return;
+  // 各ソースの辞書名を回収・検証
+  const names = [];
+  for (let i = 0; i < importSources.length; i++) {
+    const input = document.querySelector(`input[data-src="${i}"]`);
+    const name = input ? input.value.trim() : "";
+    if (!name) {
+      alert("辞書ファイル名が空のものがあります。名前を入力してください。");
+      return;
+    }
+    names.push(name);
+  }
+  // 同時に取り込むソース同士で名前が重複していたら止める
+  if (new Set(names).size !== names.length) {
+    alert("同じ辞書ファイル名が複数あります。別の名前にしてください。");
     return;
   }
   const btn = $("btnDoImport");
   btn.disabled = true;
   btn.textContent = "取り込み中…";
   try {
-    const existing = dictsCache.find((d) => d.name === name);
-    const mode = existing
-      ? document.querySelector('input[name="importMode"]:checked').value
-      : "new";
-
-    const tx = db.transaction(["dicts", "words"], "readwrite");
-    const dictStore = tx.objectStore("dicts");
-    const wordStore = tx.objectStore("words");
-
-    let dictId;
-    let baseCount = 0;
-    if (existing) {
-      dictId = existing.id;
-      if (mode === "overwrite") {
-        const keys = await idb(wordStore.index("dictId").getAllKeys(dictId));
-        for (const k of keys) wordStore.delete(k);
-      } else {
-        baseCount = existing.wordCount || 0;
-      }
-    } else {
-      dictId = await idb(dictStore.add({ groupId: currentGroupId, name, wordCount: 0, importedAt: Date.now() }));
+    let total = 0;
+    for (let i = 0; i < importSources.length; i++) {
+      const modeSel = document.querySelector(`select[data-srcmode="${i}"]`);
+      const mode = modeSel ? modeSel.value : "overwrite";
+      await importOneSource(importSources[i], names[i], mode);
+      await loadDicts(); // 次のソースの重複判定のために更新
+      total += importSources[i].entries.length;
     }
-    for (const entry of importState.entries) {
-      wordStore.add({ dictId, ...entry });
-    }
-    const newCount = baseCount + importState.entries.length;
-    const dictRec = existing
-      ? { ...existing, wordCount: newCount, importedAt: Date.now() }
-      : { id: dictId, groupId: currentGroupId, name, wordCount: newCount, importedAt: Date.now() };
-    dictStore.put(dictRec);
-    await txDone(tx);
-
-    alert(`「${name}」に ${importState.entries.length} 語を取り込みました。`);
-    importState = null;
+    alert(`${importSources.length} 個の辞書に合計 ${total} 語を取り込みました。`);
+    importSources = [];
     $("fileInput").value = "";
+    $("pasteInput").value = "";
     await refreshHome();
     showScreen("home");
   } catch (e) {
@@ -589,15 +788,188 @@ function setupImportHandlers() {
   $("btnImport").addEventListener("click", () => {
     const g = groupsCache.find((x) => x.id === currentGroupId);
     $("importGroupName").textContent = g ? g.name : "";
-    $("importError").classList.add("hidden");
+    clearImportError();
     $("importPreview").classList.add("hidden");
     $("fileInput").value = "";
-    importState = null;
+    $("pasteInput").value = "";
+    importSources = [];
     showScreen("import");
   });
-  $("fileInput").addEventListener("change", (e) => handleFileSelected(e.target.files[0]));
-  $("dictNameInput").addEventListener("input", updateImportModeBox);
+  $("fileInput").addEventListener("change", (e) => handleFilesSelected(e.target.files));
+  $("btnLoadPaste").addEventListener("click", handlePasteLoad);
   $("btnDoImport").addEventListener("click", doImport);
+}
+
+/* =========================================================
+   エクスポート：PDIC CSV形式（UTF-16LE・BOM付き）
+   ========================================================= */
+
+function buildPdicCsv(words) {
+  const q = (s) => '"' + String(s ?? "").replace(/"/g, '""') + '"';
+  const lines = [PDIC_COLUMNS.join(",")];
+  for (const w of words) {
+    const modify = String(w.modify).trim() === "1" ? 1 : 0;
+    lines.push(
+      [q(w.word), q(w.trans), q(w.exp), w.level, w.memory, modify, q(w.pron), q(w.filelink)].join(",")
+    );
+  }
+  return lines.join("\r\n") + "\r\n";
+}
+
+function encodeUtf16le(text) {
+  const buf = new Uint8Array(2 + text.length * 2);
+  buf[0] = 0xff;
+  buf[1] = 0xfe; // BOM
+  for (let i = 0; i < text.length; i++) {
+    const c = text.charCodeAt(i);
+    buf[2 + i * 2] = c & 0xff;
+    buf[3 + i * 2] = c >> 8;
+  }
+  return buf;
+}
+
+/* --- zip 作成（無圧縮・外部ライブラリなし） --- */
+
+const CRC_TABLE = (() => {
+  const t = new Uint32Array(256);
+  for (let n = 0; n < 256; n++) {
+    let c = n;
+    for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+    t[n] = c >>> 0;
+  }
+  return t;
+})();
+
+function crc32(bytes) {
+  let c = 0xffffffff;
+  for (let i = 0; i < bytes.length; i++) c = CRC_TABLE[(c ^ bytes[i]) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+
+function makeZip(files) {
+  // files: [{ name, data: Uint8Array }]
+  const enc = new TextEncoder();
+  const parts = [];
+  const central = [];
+  let offset = 0;
+  for (const f of files) {
+    const nameB = enc.encode(f.name);
+    const crc = crc32(f.data);
+    const local = new DataView(new ArrayBuffer(30));
+    local.setUint32(0, 0x04034b50, true);
+    local.setUint16(4, 20, true);
+    local.setUint16(6, 0x0800, true); // ファイル名はUTF-8
+    local.setUint16(8, 0, true); // 無圧縮
+    local.setUint32(14, crc, true);
+    local.setUint32(18, f.data.length, true);
+    local.setUint32(22, f.data.length, true);
+    local.setUint16(26, nameB.length, true);
+    parts.push(new Uint8Array(local.buffer), nameB, f.data);
+    const cd = new DataView(new ArrayBuffer(46));
+    cd.setUint32(0, 0x02014b50, true);
+    cd.setUint16(4, 20, true);
+    cd.setUint16(6, 20, true);
+    cd.setUint16(8, 0x0800, true);
+    cd.setUint32(16, crc, true);
+    cd.setUint32(20, f.data.length, true);
+    cd.setUint32(24, f.data.length, true);
+    cd.setUint16(28, nameB.length, true);
+    cd.setUint32(42, offset, true);
+    central.push(new Uint8Array(cd.buffer), nameB);
+    offset += 30 + nameB.length + f.data.length;
+  }
+  let cdSize = 0;
+  for (const p of central) cdSize += p.length;
+  const eocd = new DataView(new ArrayBuffer(22));
+  eocd.setUint32(0, 0x06054b50, true);
+  eocd.setUint16(8, files.length, true);
+  eocd.setUint16(10, files.length, true);
+  eocd.setUint32(12, cdSize, true);
+  eocd.setUint32(16, offset, true);
+  return new Blob([...parts, ...central, new Uint8Array(eocd.buffer)], { type: "application/zip" });
+}
+
+function sanitizeName(name) {
+  return name.replace(/[\\/:*?"<>|]/g, "_").trim() || "無題";
+}
+
+function downloadBlob(blob, filename) {
+  const url = URL.createObjectURL(blob);
+  const a = el("a", { href: url, download: filename });
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+}
+
+async function exportDictTxtData(dictId) {
+  // 常にDBから読み直すので、アプリ上での編集が反映された最新の内容になる
+  const words = await idb(store("words").index("dictId").getAll(dictId));
+  return encodeUtf16le(buildPdicCsv(words));
+}
+
+async function openExport() {
+  if (dictsCache.length === 0) {
+    alert("エクスポートできる辞書がありません。");
+    return;
+  }
+  const g = groupsCache.find((x) => x.id === currentGroupId);
+  $("btnExportGroup").textContent = `グループ「${g ? g.name : ""}」をまるごとエクスポート（zip）`;
+  const box = $("exportDictList");
+  clear(box);
+  for (const d of dictsCache) {
+    const cb = el("input", { type: "checkbox", "data-exportdict": String(d.id) });
+    box.appendChild(
+      el("div", { class: "export-row" }, [
+        el("label", {}, [
+          cb,
+          el("span", { class: "dict-name", text: d.name }),
+          el("span", { class: "dict-count", text: `${d.wordCount || 0}語` }),
+        ]),
+      ])
+    );
+  }
+  showScreen("export");
+}
+
+async function exportGroup() {
+  const g = groupsCache.find((x) => x.id === currentGroupId);
+  const gname = sanitizeName(g ? g.name : "辞書グループ");
+  const files = [];
+  for (const d of dictsCache) {
+    files.push({ name: `${gname}/${sanitizeName(d.name)}.txt`, data: await exportDictTxtData(d.id) });
+  }
+  downloadBlob(makeZip(files), `${gname}.zip`);
+}
+
+async function exportSelectedDicts() {
+  const ids = [];
+  document.querySelectorAll("input[data-exportdict]").forEach((c) => {
+    if (c.checked) ids.push(Number(c.getAttribute("data-exportdict")));
+  });
+  if (ids.length === 0) {
+    alert("エクスポートする辞書にチェックを入れてください。");
+    return;
+  }
+  if (ids.length === 1) {
+    const d = dictsCache.find((x) => x.id === ids[0]);
+    const data = await exportDictTxtData(d.id);
+    downloadBlob(new Blob([data], { type: "text/plain" }), `${sanitizeName(d.name)}.txt`);
+  } else {
+    const g = groupsCache.find((x) => x.id === currentGroupId);
+    const files = [];
+    for (const id of ids) {
+      const d = dictsCache.find((x) => x.id === id);
+      files.push({ name: `${sanitizeName(d.name)}.txt`, data: await exportDictTxtData(id) });
+    }
+    downloadBlob(makeZip(files), `${sanitizeName(g ? g.name : "辞書")}_選択辞書.zip`);
+  }
+}
+
+function setupExportHandlers() {
+  $("btnGoExport").addEventListener("click", openExport);
+  $("btnExportGroup").addEventListener("click", exportGroup);
+  $("btnExportSelected").addEventListener("click", exportSelectedDicts);
 }
 
 /* =========================================================
@@ -658,30 +1030,133 @@ function applyListFilter() {
   renderMoreList();
 }
 
+let listSelectMode = false;
+const listSelected = new Set(); // 選択中の単語id
+
+function makeWordRow(w) {
+  const badges = [el("span", { class: "badge", text: "Lv." + w.level })];
+  if (w.memory === 1) badges.push(el("span", { class: "badge mem", text: "暗記必須" }));
+  if (String(w.modify).trim() === "1") badges.push(el("span", { class: "badge", text: "modify" }));
+  const body = el("div", { class: "w-body" }, [
+    el("div", { class: "w-head" }, [
+      el("span", { class: "w-word", text: w.word }),
+      el("span", { class: "w-badges" }, badges),
+    ]),
+    el("div", { class: "w-trans", text: w.trans }),
+  ]);
+  const row = el("div", { class: "word-row" });
+  if (listSelectMode) {
+    const cb = el("input", { type: "checkbox", class: "w-check" });
+    cb.checked = listSelected.has(w.id);
+    row.appendChild(el("div", { class: "w-headline" }, [cb, body]));
+    row.classList.toggle("selected", listSelected.has(w.id));
+    row.addEventListener("click", () => {
+      if (listSelected.has(w.id)) listSelected.delete(w.id);
+      else listSelected.add(w.id);
+      cb.checked = listSelected.has(w.id);
+      row.classList.toggle("selected", listSelected.has(w.id));
+      updateBulkCount();
+    });
+  } else {
+    row.appendChild(body);
+    row.addEventListener("click", () => showWordModal(w));
+  }
+  return row;
+}
+
 function renderMoreList() {
   const box = $("wordList");
   const next = listFiltered.slice(listShown, listShown + LIST_PAGE);
-  for (const w of next) {
-    const badges = [el("span", { class: "badge", text: "Lv." + w.level })];
-    if (w.memory === 1) badges.push(el("span", { class: "badge mem", text: "暗記必須" }));
-    const row = el(
-      "div",
-      { class: "word-row", onclick: () => showWordModal(w) },
-      [
-        el("div", { class: "w-head" }, [
-          el("span", { class: "w-word", text: w.word }),
-          el("span", { class: "w-badges" }, badges),
-        ]),
-        el("div", { class: "w-trans", text: w.trans }),
-      ]
-    );
-    box.appendChild(row);
-  }
+  for (const w of next) box.appendChild(makeWordRow(w));
   listShown += next.length;
   $("btnMoreList").classList.toggle("hidden", listShown >= listFiltered.length);
 }
 
+function rerenderList() {
+  // 表示済みの件数を保ったまま描き直す
+  const count = Math.max(listShown, LIST_PAGE);
+  listShown = 0;
+  clear($("wordList"));
+  const box = $("wordList");
+  const slice = listFiltered.slice(0, count);
+  for (const w of slice) box.appendChild(makeWordRow(w));
+  listShown = slice.length;
+  $("btnMoreList").classList.toggle("hidden", listShown >= listFiltered.length);
+}
+
+/* --- 単語の保存（編集の反映） --- */
+
+function touchModify(w) {
+  if (String(w.modify).trim() !== "1") w.modify = 1;
+}
+
+async function persistWords(words) {
+  const tx = db.transaction("words", "readwrite");
+  const s = tx.objectStore("words");
+  for (const w of words) {
+    const rec = { ...w };
+    delete rec.dictName; // 表示用の項目はDBに保存しない
+    s.put(rec);
+  }
+  await txDone(tx);
+}
+
+/* --- 一括変更 --- */
+
+function updateBulkCount() {
+  $("bulkCount").textContent = String(listSelected.size);
+}
+
+function selectedWordObjects() {
+  return listWords.filter((w) => listSelected.has(w.id));
+}
+
+async function bulkApply(kind) {
+  const targets = selectedWordObjects();
+  if (targets.length === 0) {
+    alert("単語が選択されていません。単語をタップして選択してください。");
+    return;
+  }
+  if (kind === "level") {
+    const v = Number($("bulkLevel").value);
+    for (const w of targets) {
+      if (w.level !== v) {
+        w.level = v;
+        touchModify(w);
+      }
+    }
+  } else if (kind === "memory") {
+    const v = Number($("bulkMemory").value);
+    for (const w of targets) {
+      if (w.memory !== v) {
+        w.memory = v;
+        touchModify(w);
+      }
+    }
+  } else if (kind === "modify") {
+    const v = Number($("bulkModify").value);
+    for (const w of targets) w.modify = v;
+  }
+  await persistWords(targets);
+  rerenderList();
+  alert(`${targets.length} 語を変更しました。`);
+}
+
+function toggleSelectMode() {
+  listSelectMode = !listSelectMode;
+  listSelected.clear();
+  updateBulkCount();
+  $("bulkBar").classList.toggle("hidden", !listSelectMode);
+  $("btnSelectMode").textContent = listSelectMode ? "選択をやめる" : "選択して一括変更";
+  rerenderList();
+}
+
+/* --- 単語詳細・編集モーダル --- */
+
+let modalWord = null;
+
 function showWordModal(w) {
+  modalWord = w;
   const body = $("modalBody");
   clear(body);
   body.appendChild(el("h3", { text: w.word }));
@@ -694,14 +1169,88 @@ function showWordModal(w) {
   body.appendChild(
     el("div", {
       class: "m-text",
-      text: `レベル：${w.level}　暗記必須：${w.memory === 1 ? "はい" : "いいえ"}\n辞書：${w.dictName || ""}`,
+      text: `レベル：${w.level}　暗記必須：${w.memory === 1 ? "はい" : "いいえ"}　modify：${String(w.modify).trim() === "1" ? "1" : "0"}\n辞書：${w.dictName || ""}`,
     })
   );
+  $("btnEditWord").classList.remove("hidden");
   $("modalOverlay").classList.remove("hidden");
 }
 
+function showWordEditForm() {
+  const w = modalWord;
+  if (!w) return;
+  const body = $("modalBody");
+  clear(body);
+  body.appendChild(el("h3", { text: "単語を編集" }));
+
+  const mkText = (label, value) => {
+    const input = el("input", { type: "text", autocapitalize: "none", autocomplete: "off", spellcheck: "false" });
+    input.value = value;
+    body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: label }), input]));
+    return input;
+  };
+  const mkArea = (label, value) => {
+    const ta = el("textarea", {});
+    ta.value = value;
+    body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: label }), ta]));
+    return ta;
+  };
+
+  const inWord = mkText("見出語（word）※テストの正答になります", w.word);
+  const inTrans = mkArea("訳語（trans）", w.trans);
+  const inExp = mkArea("補足（exp）", w.exp);
+  const inPron = mkText("発音記号（pron）", w.pron);
+  const levelSel = el("select", {});
+  for (let i = 0; i <= 15; i++) levelSel.appendChild(el("option", { value: String(i), text: String(i) }));
+  levelSel.value = String(w.level);
+  body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: "レベル（level）" }), levelSel]));
+  const memCb = el("input", { type: "checkbox" });
+  memCb.checked = w.memory === 1;
+  body.appendChild(
+    el("div", { class: "edit-field" }, [el("label", {}, [memCb, document.createTextNode(" 暗記必須（memory=1）")])])
+  );
+  body.appendChild(el("p", { class: "hint", text: "保存すると、この単語に modify フラグが自動で付きます。" }));
+
+  const btnSave = el("button", { class: "btn primary full", text: "保存する" });
+  const btnCancel = el("button", { class: "btn secondary full", text: "編集をやめる" });
+  body.appendChild(btnSave);
+  body.appendChild(btnCancel);
+  $("btnEditWord").classList.add("hidden");
+
+  btnCancel.addEventListener("click", () => showWordModal(w));
+  btnSave.addEventListener("click", async () => {
+    const newWord = inWord.value;
+    if (newWord.trim() === "") {
+      alert("見出語（word）は空にできません。");
+      return;
+    }
+    const changed =
+      newWord !== w.word ||
+      inTrans.value !== w.trans ||
+      inExp.value !== w.exp ||
+      inPron.value !== w.pron ||
+      Number(levelSel.value) !== w.level ||
+      (memCb.checked ? 1 : 0) !== w.memory;
+    if (changed) {
+      w.word = newWord;
+      w.trans = inTrans.value;
+      w.exp = inExp.value;
+      w.pron = inPron.value;
+      w.level = Number(levelSel.value);
+      w.memory = memCb.checked ? 1 : 0;
+      touchModify(w); // modifyフラグがなければ自動で付ける
+      await persistWords([w]);
+      rerenderList();
+    }
+    showWordModal(w);
+  });
+}
+
 function setupListHandlers() {
-  $("btnGoList").addEventListener("click", openWordList);
+  $("btnGoList").addEventListener("click", () => {
+    if (listSelectMode) toggleSelectMode();
+    openWordList();
+  });
   $("searchInput").addEventListener("input", applyListFilter);
   for (const id of ["searchWord", "searchTrans", "searchExp", "listLevelMin", "listLevelMax", "listMemoryFilter"]) {
     $(id).addEventListener("change", applyListFilter);
@@ -711,6 +1260,21 @@ function setupListHandlers() {
   $("modalOverlay").addEventListener("click", (e) => {
     if (e.target === $("modalOverlay")) $("modalOverlay").classList.add("hidden");
   });
+  $("btnEditWord").addEventListener("click", showWordEditForm);
+  $("btnSelectMode").addEventListener("click", toggleSelectMode);
+  $("btnBulkAll").addEventListener("click", () => {
+    for (const w of listFiltered) listSelected.add(w.id);
+    updateBulkCount();
+    rerenderList();
+  });
+  $("btnBulkNone").addEventListener("click", () => {
+    listSelected.clear();
+    updateBulkCount();
+    rerenderList();
+  });
+  $("btnBulkLevel").addEventListener("click", () => bulkApply("level"));
+  $("btnBulkMemory").addEventListener("click", () => bulkApply("memory"));
+  $("btnBulkModify").addEventListener("click", () => bulkApply("modify"));
 }
 
 /* =========================================================
@@ -1075,8 +1639,10 @@ async function init() {
   db = await openDB();
   fillLevelSelect($("listLevelMin"), 0);
   fillLevelSelect($("listLevelMax"), 15);
+  fillLevelSelect($("bulkLevel"), 0);
   setupGroupHandlers();
   setupImportHandlers();
+  setupExportHandlers();
   setupListHandlers();
   setupSetupHandlers();
   setupTestHandlers();
