@@ -1,0 +1,212 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="robots" content="noindex, nofollow, noarchive">
+<meta name="theme-color" content="#4f46e5">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="スペルテスト">
+<link rel="manifest" href="./manifest.webmanifest">
+<link rel="apple-touch-icon" href="./icons/apple-touch-icon.png">
+<link rel="icon" type="image/png" href="./icons/icon-192.png">
+<link rel="stylesheet" href="./styles.css">
+<title>PDIC スペルテスト</title>
+</head>
+<body>
+
+<!-- ============ ホーム画面 ============ -->
+<section id="screen-home" class="screen">
+  <h1 class="app-title">PDIC スペルテスト</h1>
+
+  <div class="card">
+    <label class="field-label" for="groupSelect">辞書グループ</label>
+    <select id="groupSelect" class="select-big"></select>
+    <div class="btn-row">
+      <button id="btnNewGroup" class="btn small">＋ 新規</button>
+      <button id="btnRenameGroup" class="btn small">名前変更</button>
+      <button id="btnDeleteGroup" class="btn small danger">削除</button>
+    </div>
+  </div>
+
+  <div class="card">
+    <div class="card-head">
+      <h2>辞書ファイル</h2>
+      <span id="dictTotalCount" class="muted"></span>
+    </div>
+    <p class="hint">テストに使う辞書にチェックを入れてください。</p>
+    <div id="dictList" class="dict-list"></div>
+    <button id="btnImport" class="btn secondary full">＋ 辞書ファイルをインポート</button>
+  </div>
+
+  <button id="btnGoSetup" class="btn primary big full">テストをはじめる</button>
+  <button id="btnGoList" class="btn secondary big full">単語一覧・検索</button>
+
+  <details class="card">
+    <summary>テスト履歴</summary>
+    <div id="historyList"></div>
+  </details>
+
+  <p class="privacy-note">単語データ・テスト履歴はすべてこの端末の中だけに保存されます。外部への送信は一切行いません。</p>
+</section>
+
+<!-- ============ インポート画面 ============ -->
+<section id="screen-import" class="screen hidden">
+  <div class="topbar">
+    <button class="btn-back" data-back="home">← 戻る</button>
+    <h2>辞書ファイルのインポート</h2>
+  </div>
+
+  <div class="card">
+    <p class="hint">PDICでCSV形式（UTF-16）で出力した <b>.txt</b> ファイルを選択してください。</p>
+    <p class="hint">取り込み先グループ：<b id="importGroupName"></b></p>
+    <label class="file-label">
+      <input type="file" id="fileInput" accept=".txt">
+      <span class="btn primary full file-btn">.txt ファイルを選択</span>
+    </label>
+    <div id="importError" class="error-box hidden"></div>
+  </div>
+
+  <div id="importPreview" class="hidden">
+    <div class="card">
+      <h3>読み込み内容の確認</h3>
+      <div id="importSummary"></div>
+      <div class="preview-scroll">
+        <table id="previewTable"></table>
+      </div>
+    </div>
+    <div class="card">
+      <label class="field-label" for="dictNameInput">辞書ファイル名（アプリ内での表示名）</label>
+      <input type="text" id="dictNameInput" class="input-big">
+      <div id="importModeBox" class="hidden">
+        <p class="hint warn">同じ名前の辞書がすでにあります。どうしますか？</p>
+        <label class="radio-line"><input type="radio" name="importMode" value="overwrite" checked> 上書きする（既存の単語を消して入れ替え）</label>
+        <label class="radio-line"><input type="radio" name="importMode" value="append"> 追加する（既存の単語に追記）</label>
+      </div>
+      <button id="btnDoImport" class="btn primary big full">この内容で取り込む</button>
+    </div>
+  </div>
+</section>
+
+<!-- ============ 単語一覧画面 ============ -->
+<section id="screen-list" class="screen hidden">
+  <div class="topbar">
+    <button class="btn-back" data-back="home">← 戻る</button>
+    <h2>単語一覧・検索</h2>
+  </div>
+
+  <div class="card">
+    <input type="text" id="searchInput" class="input-big" placeholder="検索語を入力"
+           autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false">
+    <div class="check-row">
+      <label><input type="checkbox" id="searchWord" checked> 見出語</label>
+      <label><input type="checkbox" id="searchTrans" checked> 訳語</label>
+      <label><input type="checkbox" id="searchExp" checked> 補足</label>
+    </div>
+    <div class="filter-row">
+      <span>レベル</span>
+      <select id="listLevelMin"></select>
+      <span>〜</span>
+      <select id="listLevelMax"></select>
+      <select id="listMemoryFilter">
+        <option value="all">すべて</option>
+        <option value="1">暗記必須のみ</option>
+        <option value="0">暗記必須以外</option>
+      </select>
+    </div>
+    <p id="listCount" class="muted"></p>
+  </div>
+
+  <div id="wordList" class="word-list"></div>
+  <button id="btnMoreList" class="btn secondary full hidden">さらに表示</button>
+</section>
+
+<!-- ============ テスト設定画面 ============ -->
+<section id="screen-setup" class="screen hidden">
+  <div class="topbar">
+    <button class="btn-back" data-back="home">← 戻る</button>
+    <h2>テスト設定</h2>
+  </div>
+
+  <div class="card">
+    <h3>テスト対象の辞書</h3>
+    <ul id="setupDictNames" class="plain-list"></ul>
+  </div>
+
+  <div class="card">
+    <h3>出題範囲</h3>
+    <div class="filter-row">
+      <span>レベル</span>
+      <select id="setupLevelMin"></select>
+      <span>〜</span>
+      <select id="setupLevelMax"></select>
+    </div>
+    <label class="check-line"><input type="checkbox" id="setupMemoryOnly"> 暗記必須単語（memory=1）のみ出題する</label>
+    <p class="count-line">対象単語数：<b id="setupCount">0</b> 語</p>
+  </div>
+
+  <button id="btnStartTest" class="btn primary big full">テスト開始</button>
+</section>
+
+<!-- ============ テスト画面 ============ -->
+<section id="screen-test" class="screen hidden">
+  <div class="topbar test-topbar">
+    <button id="btnQuitTest" class="btn-back">✕ 中断</button>
+    <span id="testModeLabel" class="mode-label"></span>
+    <span id="testProgress" class="progress-label"></span>
+  </div>
+
+  <div class="card question-card">
+    <p class="hint center">この訳語に対応する見出語を入力してください</p>
+    <div id="questionTrans" class="question-trans"></div>
+  </div>
+
+  <div id="feedback" class="feedback"></div>
+
+  <div id="answerPanel" class="card answer-panel hidden">
+    <div class="answer-word-row">
+      <span id="answerWord" class="answer-word"></span>
+      <span id="answerPron" class="answer-pron"></span>
+    </div>
+    <div id="answerExp" class="answer-exp"></div>
+  </div>
+
+  <div class="test-controls">
+    <input type="text" id="answerInput" class="input-answer" placeholder="スペルを入力"
+           autocapitalize="none" autocomplete="off" autocorrect="off" spellcheck="false" enterkeyhint="go">
+    <button id="btnJudge" class="btn primary big full">判定する</button>
+    <div class="btn-row">
+      <button id="btnReveal" class="btn secondary half">答えを見る</button>
+      <button id="btnNext" class="btn primary half hidden">次へ →</button>
+    </div>
+    <p class="hint center pc-only">PCでは Enter キーで判定／次へ進めます</p>
+  </div>
+</section>
+
+<!-- ============ 結果画面 ============ -->
+<section id="screen-result" class="screen hidden">
+  <h1 id="resultTitle" class="app-title">テスト結果</h1>
+  <div class="card result-card">
+    <div id="resultStats" class="result-stats"></div>
+    <div id="resultRate" class="result-rate"></div>
+  </div>
+  <div id="resultWrongBox" class="card hidden">
+    <h3>間違えた単語</h3>
+    <ul id="resultWrongList" class="plain-list"></ul>
+  </div>
+  <button id="btnStartRemedial" class="btn primary big full hidden">補習テストをはじめる</button>
+  <button id="btnResultHome" class="btn secondary big full">ホームに戻る</button>
+</section>
+
+<!-- ============ 単語詳細モーダル ============ -->
+<div id="modalOverlay" class="modal-overlay hidden">
+  <div class="modal">
+    <div id="modalBody"></div>
+    <button id="btnCloseModal" class="btn secondary full">閉じる</button>
+  </div>
+</div>
+
+<script src="./app.js"></script>
+</body>
+</html>
