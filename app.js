@@ -509,48 +509,7 @@ function colRefToIndex(ref) {
   return idx - 1;
 }
 
-async function parseXlsx(buffer) {
-  if (typeof DecompressionStream === "undefined") {
-    throw new Error("お使いのブラウザは xlsx の読み込みに対応していません。PDICのCSV形式（.txt）でお試しください。");
-  }
-  const zip = await unzipFile(buffer);
-  const utf8 = new TextDecoder("utf-8");
-  const readXml = async (name) => {
-    const data = await zip.read(name);
-    if (!data) return null;
-    return new DOMParser().parseFromString(utf8.decode(data), "application/xml");
-  };
-  // 最初のシートのパスを workbook.xml.rels から特定（だめなら sheet1.xml）
-  let sheetPath = null;
-  const wb = await readXml("xl/workbook.xml");
-  const rels = await readXml("xl/_rels/workbook.xml.rels");
-  if (wb && rels) {
-    const sheet = wb.getElementsByTagName("sheet")[0];
-    const rid = sheet ? sheet.getAttribute("r:id") : null;
-    if (rid) {
-      for (const rel of rels.getElementsByTagName("Relationship")) {
-        if (rel.getAttribute("Id") === rid) {
-          let t = rel.getAttribute("Target") || "";
-          sheetPath = t.startsWith("/") ? t.slice(1) : "xl/" + t.replace(/^\.\//, "");
-        }
-      }
-    }
-  }
-  if (!sheetPath || !zip.names.includes(sheetPath)) {
-    sheetPath = zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort()[0];
-  }
-  if (!sheetPath) throw new Error("xlsxの中にワークシートが見つかりません");
-  // 共有文字列テーブル
-  const shared = [];
-  const ss = await readXml("xl/sharedStrings.xml");
-  if (ss) {
-    for (const si of ss.getElementsByTagName("si")) {
-      let s = "";
-      for (const t of si.getElementsByTagName("t")) s += t.textContent;
-      shared.push(s);
-    }
-  }
-  const sheetDoc = await readXml(sheetPath);
+function sheetDocToRows(sheetDoc, shared) {
   const rows = [];
   for (const rowEl of sheetDoc.getElementsByTagName("row")) {
     const row = [];
@@ -576,33 +535,108 @@ async function parseXlsx(buffer) {
   return rows.filter((r) => r.some((c) => c.trim() !== ""));
 }
 
+async function parseXlsxWorkbook(buffer) {
+  // 全シートを [{ name, rows }] で返す（ブック内の並び順）
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("お使いのブラウザは xlsx の読み込みに対応していません。PDICのCSV形式（.txt）でお試しください。");
+  }
+  const zip = await unzipFile(buffer);
+  const utf8 = new TextDecoder("utf-8");
+  const readXml = async (name) => {
+    const data = await zip.read(name);
+    if (!data) return null;
+    return new DOMParser().parseFromString(utf8.decode(data), "application/xml");
+  };
+  // 共有文字列テーブル
+  const shared = [];
+  const ss = await readXml("xl/sharedStrings.xml");
+  if (ss) {
+    for (const si of ss.getElementsByTagName("si")) {
+      let s = "";
+      for (const t of si.getElementsByTagName("t")) s += t.textContent;
+      shared.push(s);
+    }
+  }
+  // workbook.xml のシート一覧と rels の対応からパスを解決
+  const sheets = [];
+  const wb = await readXml("xl/workbook.xml");
+  const rels = await readXml("xl/_rels/workbook.xml.rels");
+  if (wb && rels) {
+    const relMap = new Map();
+    for (const rel of rels.getElementsByTagName("Relationship")) {
+      let t = rel.getAttribute("Target") || "";
+      relMap.set(rel.getAttribute("Id"), t.startsWith("/") ? t.slice(1) : "xl/" + t.replace(/^\.\//, ""));
+    }
+    for (const sheetEl of wb.getElementsByTagName("sheet")) {
+      const name = sheetEl.getAttribute("name") || "";
+      const rid = sheetEl.getAttribute("r:id");
+      const path = rid ? relMap.get(rid) : null;
+      if (path && zip.names.includes(path)) sheets.push({ name, path });
+    }
+  }
+  if (sheets.length === 0) {
+    // 解決できなかったときは sheetN.xml を順に拾う
+    const paths = zip.names.filter((n) => /^xl\/worksheets\/sheet\d+\.xml$/.test(n)).sort();
+    paths.forEach((p, i) => sheets.push({ name: `Sheet${i + 1}`, path: p }));
+  }
+  if (sheets.length === 0) throw new Error("xlsxの中にワークシートが見つかりません");
+  const result = [];
+  for (const s of sheets) {
+    const doc = await readXml(s.path);
+    result.push({ name: s.name || "Sheet", rows: doc ? sheetDocToRows(doc, shared) : [] });
+  }
+  return result;
+}
+
 /* --- インポート：ファイル選択（複数可）と貼り付け --- */
 
 async function sourceFromFile(file) {
-  const lower = file.name.toLowerCase();
-  let rows;
-  if (lower.endsWith(".txt")) {
-    const text = decodeUtf16(await file.arrayBuffer());
-    if (text.includes("�")) {
-      throw new Error("UTF-16として正しく読み取れませんでした。PDICのCSV出力時に文字コードを「Unicode（UTF-16）」にしてください。");
-    }
-    const { rows: r, unterminatedQuote } = parseCSV(text);
-    if (unterminatedQuote) throw new Error("閉じられていないダブルクォート（\"）があります。");
-    rows = r;
-  } else if (lower.endsWith(".xlsx")) {
-    rows = await parseXlsx(await file.arrayBuffer());
-  } else {
-    throw new Error("拡張子が .txt または .xlsx のファイルを選択してください。");
+  // .txt（PDIC CSV）→ ソース1つ
+  const text = decodeUtf16(await file.arrayBuffer());
+  if (text.includes("�")) {
+    throw new Error("UTF-16として正しく読み取れませんでした。PDICのCSV出力時に文字コードを「Unicode（UTF-16）」にしてください。");
   }
+  const { rows, unterminatedQuote } = parseCSV(text);
+  if (unterminatedQuote) throw new Error("閉じられていないダブルクォート（\"）があります。");
   if (rows.length === 0) throw new Error("データがありません。");
   const { entries, warnings } = rowsToEntries(rows);
   if (entries.length === 0) throw new Error("取り込める単語がありませんでした。見出語（word）列を確認してください。");
   return {
     label: file.name,
-    defaultName: file.name.replace(/\.(txt|xlsx)$/i, ""),
+    defaultName: file.name.replace(/\.txt$/i, ""),
     entries,
     warnings,
+    selected: true,
+    showCheckbox: false,
   };
+}
+
+async function sourcesFromXlsx(file, errors) {
+  // .xlsx → シートごとにソースを作る（複数シートなら画面で選択できる）
+  const sheets = await parseXlsxWorkbook(await file.arrayBuffer());
+  const multi = sheets.length > 1;
+  const sources = [];
+  for (const sh of sheets) {
+    if (sh.rows.length === 0) {
+      if (multi) errors.push(`${file.name}：シート「${sh.name}」は空のためスキップしました。`);
+      else errors.push(`${file.name}：データがありません。`);
+      continue;
+    }
+    const { entries, warnings } = rowsToEntries(sh.rows);
+    if (entries.length === 0) {
+      errors.push(`${file.name} シート「${sh.name}」：取り込める単語がありませんでした。見出語（word）列を確認してください。`);
+      continue;
+    }
+    sources.push({
+      label: multi ? `${file.name} — シート「${sh.name}」` : file.name,
+      defaultName: multi ? sh.name : file.name.replace(/\.xlsx$/i, ""),
+      entries,
+      warnings,
+      selected: true,
+      showCheckbox: multi, // 複数シートのときはチェックで取り込み対象を選べる
+    });
+  }
+  return sources;
 }
 
 async function handleFilesSelected(fileList) {
@@ -613,13 +647,20 @@ async function handleFilesSelected(fileList) {
   const sources = [];
   for (const f of files) {
     try {
-      sources.push(await sourceFromFile(f));
+      const lower = f.name.toLowerCase();
+      if (lower.endsWith(".txt")) {
+        sources.push(await sourceFromFile(f));
+      } else if (lower.endsWith(".xlsx")) {
+        sources.push(...(await sourcesFromXlsx(f, errors)));
+      } else {
+        throw new Error("拡張子が .txt または .xlsx のファイルを選択してください。");
+      }
     } catch (e) {
       errors.push(`${f.name}：${e.message}`);
     }
   }
   if (errors.length > 0) {
-    showImportError("読み込めなかったファイルがあります。\n" + errors.join("\n"));
+    showImportError("読み込めなかったものがあります。\n" + errors.join("\n"));
   }
   if (sources.length > 0) {
     importSources = sources;
@@ -654,6 +695,8 @@ function handlePasteLoad() {
       defaultName: `貼り付け ${d.getMonth() + 1}-${d.getDate()} ${d.getHours()}${String(d.getMinutes()).padStart(2, "0")}`,
       entries,
       warnings,
+      selected: true,
+      showCheckbox: false,
     },
   ];
   renderImportPreview();
@@ -664,6 +707,20 @@ function renderImportPreview() {
   clear(box);
   importSources.forEach((src, i) => {
     const card = el("div", { class: "card source-card" });
+    if (src.showCheckbox) {
+      const selCb = el("input", { type: "checkbox" });
+      selCb.checked = src.selected;
+      selCb.addEventListener("change", () => {
+        src.selected = selCb.checked;
+        card.classList.toggle("source-off", !src.selected);
+      });
+      card.appendChild(
+        el("label", { class: "check-line source-check" }, [
+          selCb,
+          document.createTextNode(" このシートを取り込む"),
+        ])
+      );
+    }
     card.appendChild(el("h3", { text: src.label }));
     card.appendChild(el("p", { class: "import-summary-line", text: `取り込み件数：${src.entries.length} 語` }));
     for (const w of src.warnings) {
@@ -742,19 +799,24 @@ async function importOneSource(src, name, mode) {
 
 async function doImport() {
   if (importSources.length === 0) return;
-  // 各ソースの辞書名を回収・検証
-  const names = [];
+  // 取り込み対象（チェックされたもの）の辞書名を回収・検証
+  const targets = [];
   for (let i = 0; i < importSources.length; i++) {
+    if (!importSources[i].selected) continue;
     const input = document.querySelector(`input[data-src="${i}"]`);
     const name = input ? input.value.trim() : "";
     if (!name) {
       alert("辞書ファイル名が空のものがあります。名前を入力してください。");
       return;
     }
-    names.push(name);
+    targets.push({ index: i, name });
+  }
+  if (targets.length === 0) {
+    alert("取り込むシートが選択されていません。");
+    return;
   }
   // 同時に取り込むソース同士で名前が重複していたら止める
-  if (new Set(names).size !== names.length) {
+  if (new Set(targets.map((t) => t.name)).size !== targets.length) {
     alert("同じ辞書ファイル名が複数あります。別の名前にしてください。");
     return;
   }
@@ -763,14 +825,14 @@ async function doImport() {
   btn.textContent = "取り込み中…";
   try {
     let total = 0;
-    for (let i = 0; i < importSources.length; i++) {
-      const modeSel = document.querySelector(`select[data-srcmode="${i}"]`);
+    for (const t of targets) {
+      const modeSel = document.querySelector(`select[data-srcmode="${t.index}"]`);
       const mode = modeSel ? modeSel.value : "overwrite";
-      await importOneSource(importSources[i], names[i], mode);
+      await importOneSource(importSources[t.index], t.name, mode);
       await loadDicts(); // 次のソースの重複判定のために更新
-      total += importSources[i].entries.length;
+      total += importSources[t.index].entries.length;
     }
-    alert(`${importSources.length} 個の辞書に合計 ${total} 語を取り込みました。`);
+    alert(`${targets.length} 個の辞書に合計 ${total} 語を取り込みました。`);
     importSources = [];
     $("fileInput").value = "";
     $("pasteInput").value = "";
@@ -893,6 +955,131 @@ function sanitizeName(name) {
   return name.replace(/[\\/:*?"<>|]/g, "_").trim() || "無題";
 }
 
+/* --- xlsx 作成（インポートと同じカラム構成・そのまま再インポート可能） --- */
+
+function xmlEscape(s) {
+  return String(s ?? "")
+    .replace(/\r\n/g, "\n")
+    .replace(/\r/g, "\n")
+    .replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, "") // XMLで使えない制御文字を除去
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
+function xmlEscapeAttr(s) {
+  return xmlEscape(s).replace(/"/g, "&quot;").replace(/\n/g, " ");
+}
+
+function sanitizeSheetName(name, used) {
+  // Excelのシート名制限：31文字まで、[ ] : * ? / \ は使えない
+  let n = String(name).replace(/[\[\]:*?/\\]/g, "_").trim();
+  if (!n) n = "Sheet";
+  n = n.slice(0, 31);
+  let base = n;
+  let i = 2;
+  while (used.has(n)) {
+    const suffix = `(${i++})`;
+    n = base.slice(0, 31 - suffix.length) + suffix;
+  }
+  used.add(n);
+  return n;
+}
+
+function buildXlsxBlob(sheetDefs) {
+  // sheetDefs: [{ name, words }]
+  const used = new Set();
+  const sheets = sheetDefs.map((s, i) => ({
+    name: sanitizeSheetName(s.name, used),
+    words: s.words,
+    file: `sheet${i + 1}.xml`,
+  }));
+  const colLetters = ["A", "B", "C", "D", "E", "F", "G", "H"];
+  const cellStr = (ref, v) =>
+    `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xmlEscape(v)}</t></is></c>`;
+  const cellNum = (ref, v) => `<c r="${ref}"><v>${Number(v) || 0}</v></c>`;
+
+  const sheetXml = (words) => {
+    const rows = [];
+    rows.push(
+      '<row r="1">' + PDIC_COLUMNS.map((c, ci) => cellStr(colLetters[ci] + "1", c)).join("") + "</row>"
+    );
+    words.forEach((w, wi) => {
+      const r = wi + 2;
+      const modify = String(w.modify).trim() === "1" ? 1 : 0;
+      rows.push(
+        `<row r="${r}">` +
+          cellStr("A" + r, w.word) +
+          cellStr("B" + r, w.trans) +
+          cellStr("C" + r, w.exp) +
+          cellNum("D" + r, w.level) +
+          cellNum("E" + r, w.memory) +
+          cellNum("F" + r, modify) +
+          cellStr("G" + r, w.pron) +
+          cellStr("H" + r, w.filelink) +
+          "</row>"
+      );
+    });
+    return (
+      '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+      '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">' +
+      "<sheetData>" +
+      rows.join("") +
+      "</sheetData></worksheet>"
+    );
+  };
+
+  const contentTypes =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">' +
+    '<Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>' +
+    '<Default Extension="xml" ContentType="application/xml"/>' +
+    '<Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/>' +
+    sheets
+      .map(
+        (s) =>
+          `<Override PartName="/xl/worksheets/${s.file}" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/>`
+      )
+      .join("") +
+    "</Types>";
+
+  const rootRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/>' +
+    "</Relationships>";
+
+  const workbook =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" ' +
+    'xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets>' +
+    sheets
+      .map((s, i) => `<sheet name="${xmlEscapeAttr(s.name)}" sheetId="${i + 1}" r:id="rId${i + 1}"/>`)
+      .join("") +
+    "</sheets></workbook>";
+
+  const wbRels =
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>' +
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">' +
+    sheets
+      .map(
+        (s, i) =>
+          `<Relationship Id="rId${i + 1}" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/${s.file}"/>`
+      )
+      .join("") +
+    "</Relationships>";
+
+  const enc = new TextEncoder();
+  const files = [
+    { name: "[Content_Types].xml", data: enc.encode(contentTypes) },
+    { name: "_rels/.rels", data: enc.encode(rootRels) },
+    { name: "xl/workbook.xml", data: enc.encode(workbook) },
+    { name: "xl/_rels/workbook.xml.rels", data: enc.encode(wbRels) },
+    ...sheets.map((s) => ({ name: `xl/worksheets/${s.file}`, data: enc.encode(sheetXml(s.words)) })),
+  ];
+  return makeZip(files);
+}
+
 function downloadBlob(blob, filename) {
   const url = URL.createObjectURL(blob);
   const a = el("a", { href: url, download: filename });
@@ -942,6 +1129,18 @@ async function exportGroup() {
   downloadBlob(makeZip(files), `${gname}.zip`);
 }
 
+async function exportGroupXlsx() {
+  // グループ全体を1つの.xlsxに：各辞書ファイル＝1シート（シート名＝辞書名）
+  const g = groupsCache.find((x) => x.id === currentGroupId);
+  const gname = sanitizeName(g ? g.name : "辞書グループ");
+  const sheetDefs = [];
+  for (const d of dictsCache) {
+    const words = await idb(store("words").index("dictId").getAll(d.id));
+    sheetDefs.push({ name: d.name, words });
+  }
+  downloadBlob(buildXlsxBlob(sheetDefs), `${gname}.xlsx`);
+}
+
 async function exportSelectedDicts() {
   const ids = [];
   document.querySelectorAll("input[data-exportdict]").forEach((c) => {
@@ -969,6 +1168,7 @@ async function exportSelectedDicts() {
 function setupExportHandlers() {
   $("btnGoExport").addEventListener("click", openExport);
   $("btnExportGroup").addEventListener("click", exportGroup);
+  $("btnExportGroupXlsx").addEventListener("click", exportGroupXlsx);
   $("btnExportSelected").addEventListener("click", exportSelectedDicts);
 }
 
@@ -1034,16 +1234,24 @@ let listSelectMode = false;
 const listSelected = new Set(); // 選択中の単語id
 
 function makeWordRow(w) {
-  const badges = [el("span", { class: "badge", text: "Lv." + w.level })];
-  if (w.memory === 1) badges.push(el("span", { class: "badge mem", text: "暗記必須" }));
-  if (String(w.modify).trim() === "1") badges.push(el("span", { class: "badge", text: "modify" }));
-  const body = el("div", { class: "w-body" }, [
-    el("div", { class: "w-head" }, [
-      el("span", { class: "w-word", text: w.word }),
-      el("span", { class: "w-badges" }, badges),
-    ]),
+  const headChildren = [el("span", { class: "w-word", text: w.word })];
+  if (w.pron) headChildren.push(el("span", { class: "w-pron", text: w.pron }));
+  headChildren.push(
+    el("span", { class: "w-badges" }, [el("span", { class: "badge", text: "Lv." + w.level })])
+  );
+  const bodyChildren = [
+    el("div", { class: "w-head" }, headChildren),
     el("div", { class: "w-trans", text: w.trans }),
-  ]);
+  ];
+  if ($("listShowExp").checked && w.exp) {
+    bodyChildren.push(el("div", { class: "w-exp", text: w.exp }));
+  }
+  // 右下の1文字バッジ（Lv.の下に縦に並ぶ位置）：「暗」=暗記必須、「修」=修正済
+  const flags = [];
+  if (w.memory === 1) flags.push(el("span", { class: "badge mem", text: "暗" }));
+  if (String(w.modify).trim() === "1") flags.push(el("span", { class: "badge mod", text: "修" }));
+  if (flags.length > 0) bodyChildren.push(el("div", { class: "w-flags" }, flags));
+  const body = el("div", { class: "w-body" }, bodyChildren);
   const row = el("div", { class: "word-row" });
   if (listSelectMode) {
     const cb = el("input", { type: "checkbox", class: "w-check" });
@@ -1169,7 +1377,7 @@ function showWordModal(w) {
   body.appendChild(
     el("div", {
       class: "m-text",
-      text: `レベル：${w.level}　暗記必須：${w.memory === 1 ? "はい" : "いいえ"}　modify：${String(w.modify).trim() === "1" ? "1" : "0"}\n辞書：${w.dictName || ""}`,
+      text: `レベル：${w.level}　暗記必須：${w.memory === 1 ? "はい" : "いいえ"}　修正済：${String(w.modify).trim() === "1" ? "あり" : "なし"}\n辞書：${w.dictName || ""}`,
     })
   );
   $("btnEditWord").classList.remove("hidden");
@@ -1209,7 +1417,7 @@ function showWordEditForm() {
   body.appendChild(
     el("div", { class: "edit-field" }, [el("label", {}, [memCb, document.createTextNode(" 暗記必須（memory=1）")])])
   );
-  body.appendChild(el("p", { class: "hint", text: "保存すると、この単語に modify フラグが自動で付きます。" }));
+  body.appendChild(el("p", { class: "hint", text: "保存すると、この単語に修正済（modify）フラグが自動で付きます。" }));
 
   const btnSave = el("button", { class: "btn primary full", text: "保存する" });
   const btnCancel = el("button", { class: "btn secondary full", text: "編集をやめる" });
@@ -1256,6 +1464,7 @@ function setupListHandlers() {
     $(id).addEventListener("change", applyListFilter);
   }
   $("btnMoreList").addEventListener("click", renderMoreList);
+  $("listShowExp").addEventListener("change", rerenderList);
   $("btnCloseModal").addEventListener("click", () => $("modalOverlay").classList.add("hidden"));
   $("modalOverlay").addEventListener("click", (e) => {
     if (e.target === $("modalOverlay")) $("modalOverlay").classList.add("hidden");

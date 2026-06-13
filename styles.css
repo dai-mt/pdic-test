@@ -235,6 +235,18 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; vertica
   color: var(--muted); font-size: 0.85rem; margin-top: 4px;
   display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
 }
+.word-row .w-pron { color: var(--muted); font-size: 0.82rem; overflow-wrap: anywhere; }
+.word-row .w-exp {
+  color: #4b5563; font-size: 0.82rem; margin-top: 4px;
+  white-space: pre-wrap; overflow-wrap: anywhere;
+  border-top: 1px dashed var(--border); padding-top: 4px;
+}
+.word-row .w-flags { display: flex; justify-content: flex-end; gap: 6px; margin-top: 4px; }
+.badge.mod { background: #dbeafe; color: #1d4ed8; }
+
+/* インポートのシート選択 */
+.source-check { font-weight: 700; margin: 0 0 8px; }
+.source-card.source-off { opacity: 0.45; }
 
 /* --- modal --- */
 .modal-overlay {

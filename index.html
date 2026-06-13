@@ -92,6 +92,8 @@
     <p class="hint">アプリ上で編集した最新の内容を、PDICのCSV形式（UTF-16・.txt）で書き出します。書き出したファイルはこのアプリで再インポートできます。</p>
     <button id="btnExportGroup" class="btn primary big full">グループをまるごとエクスポート（zip）</button>
     <p class="hint">zipを解凍すると、グループ名のフォルダの中に各辞書の .txt が入っています。</p>
+    <button id="btnExportGroupXlsx" class="btn secondary big full">グループをまるごとエクスポート（Excel）</button>
+    <p class="hint">グループ名のExcelファイル（.xlsx）が1つダウンロードされ、各辞書が1シートになります。このファイルはそのまま再インポートできます。</p>
   </div>
 
   <div class="card">
@@ -127,7 +129,7 @@
       <button id="btnBulkMemory" class="btn small">変更</button>
     </div>
     <div class="filter-row">
-      <span>modifyフラグを</span>
+      <span>修正済（modify）を</span>
       <select id="bulkModify"><option value="1">1（あり）</option><option value="0">0（なし）</option></select>
       <span>に</span>
       <button id="btnBulkModify" class="btn small">変更</button>
@@ -142,6 +144,9 @@
       <label><input type="checkbox" id="searchWord" checked> 見出語</label>
       <label><input type="checkbox" id="searchTrans" checked> 訳語</label>
       <label><input type="checkbox" id="searchExp" checked> 補足</label>
+    </div>
+    <div class="check-row">
+      <label><input type="checkbox" id="listShowExp"> 補足（exp）も表示する</label>
     </div>
     <div class="filter-row">
       <span>レベル</span>
