@@ -329,7 +329,12 @@ input[type="checkbox"], input[type="radio"] { width: 18px; height: 18px; vertica
 details.card summary { font-weight: 700; cursor: pointer; }
 .history-row { padding: 8px 0; border-bottom: 1px solid var(--border); font-size: 0.88rem; }
 .history-row:last-child { border-bottom: none; }
-.history-date { color: var(--muted); font-size: 0.78rem; }
+.history-head { display: flex; align-items: center; gap: 8px; }
+.history-date { color: var(--muted); font-size: 0.78rem; flex: 1; }
+.history-del {
+  appearance: none; border: none; background: none;
+  color: var(--danger); font-size: 0.8rem; padding: 4px 6px; cursor: pointer; white-space: nowrap;
+}
 .history-range { color: var(--muted); font-size: 0.78rem; margin-top: 2px; overflow-wrap: anywhere; }
 .history-detail { margin-top: 8px; padding-top: 8px; border-top: 1px dashed var(--border); }
 .history-wrong-list { margin-bottom: 8px; }

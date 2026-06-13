@@ -264,6 +264,17 @@ async function renderHistory() {
     const rate = h.total > 0 ? Math.round((h.correctCount / h.total) * 100) : 0;
 
     const head = el("div", { class: "history-date", text: dateStr + (h.interrupted ? "（中断）" : "") });
+    const delBtn = el("button", {
+      class: "history-del",
+      text: "削除",
+      onclick: async (ev) => {
+        ev.stopPropagation();
+        if (!confirm("このテスト履歴を削除しますか？")) return;
+        await idb(store("history", "readwrite").delete(h.id));
+        await renderHistory();
+      },
+    });
+    const headRow = el("div", { class: "history-head" }, [head, delBtn]);
     const stat = el("div", { text: `出題 ${h.total}　正解 ${h.correctCount}　不正解 ${h.wrongCount}　正答率 ${rate}%` });
 
     // 対象範囲
@@ -275,7 +286,7 @@ async function renderHistory() {
       rangeParts.push(`レベル ${h.levelMin}〜${h.levelMax}`);
     }
     if (h.memoryOnly) rangeParts.push("暗記必須のみ");
-    const rowChildren = [head, stat];
+    const rowChildren = [headRow, stat];
     if (rangeParts.length > 0) {
       rowChildren.push(el("div", { class: "history-range", text: rangeParts.join(" ／ ") }));
     }
@@ -1282,10 +1293,15 @@ function applyListFilter() {
   const min = Number($("listLevelMin").value);
   const max = Number($("listLevelMax").value);
   const memF = $("listMemoryFilter").value;
+  const modF = $("listModifyFilter").value;
 
   listFiltered = listWords.filter((w) => {
     if (w.level < min || w.level > max) return false;
     if (memF !== "all" && String(w.memory) !== memF) return false;
+    if (modF !== "all") {
+      const isModified = String(w.modify).trim() === "1" ? "1" : "0";
+      if (isModified !== modF) return false;
+    }
     if (q !== "") {
       let hit = false;
       if (inWord && w.word.toLowerCase().includes(q)) hit = true;
@@ -1556,7 +1572,7 @@ function setupListHandlers() {
     openWordList();
   });
   $("searchInput").addEventListener("input", applyListFilter);
-  for (const id of ["searchWord", "searchTrans", "searchExp", "listLevelMin", "listLevelMax", "listMemoryFilter"]) {
+  for (const id of ["searchWord", "searchTrans", "searchExp", "listLevelMin", "listLevelMax", "listMemoryFilter", "listModifyFilter"]) {
     $(id).addEventListener("change", applyListFilter);
   }
   $("btnMoreList").addEventListener("click", renderMoreList);
