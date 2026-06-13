@@ -134,8 +134,15 @@
       <span>に</span>
       <button id="btnBulkModify" class="btn small">変更</button>
     </div>
-    <p class="hint">レベル・memoryを変更した単語には、modifyフラグが自動で付きます。</p>
+    <p class="hint">レベルを変更した単語には、修正済（modify）フラグが自動で付きます（暗記必須の変更では付きません）。</p>
   </div>
+
+  <details class="card">
+    <summary>ペーストして暗記必須を一括オン</summary>
+    <p class="hint">見出語を1行に1つずつ貼り付けて実行すると、このグループ内で一致する単語の「暗記必須」をオンにします。</p>
+    <textarea id="memPasteInput" class="input-big paste-area" placeholder="apple&#10;banana&#10;cherry"></textarea>
+    <button id="btnMemPaste" class="btn secondary full">暗記必須をオンにする</button>
+  </details>
 
   <div class="card">
     <input type="text" id="searchInput" class="input-big" placeholder="検索語を入力"

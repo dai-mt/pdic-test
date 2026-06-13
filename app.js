@@ -220,26 +220,97 @@ async function deleteDict(dictId) {
   await txDone(tx);
 }
 
+async function copyToClipboard(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+    return true;
+  } catch (e) {
+    // 古い環境向けのフォールバック
+    try {
+      const ta = el("textarea", {});
+      ta.value = text;
+      ta.style.position = "fixed";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.select();
+      const ok = document.execCommand("copy");
+      ta.remove();
+      return ok;
+    } catch (e2) {
+      return false;
+    }
+  }
+}
+
 async function renderHistory() {
   const box = $("historyList");
   clear(box);
+  const g = groupsCache.find((x) => x.id === currentGroupId);
+  const groupName = g ? g.name : "";
   const all = await idb(store("history").getAll());
-  all.sort((a, b) => b.date - a.date);
-  const recent = all.slice(0, 20);
+  // 表示中の辞書グループの履歴だけに絞る（古い記録はグループ名で照合）
+  const mine = all.filter((h) =>
+    h.groupId != null ? h.groupId === currentGroupId : h.groupName === groupName
+  );
+  mine.sort((a, b) => b.date - a.date);
+  const recent = mine.slice(0, 30);
   if (recent.length === 0) {
-    box.appendChild(el("p", { class: "empty-note", text: "まだテスト履歴がありません。" }));
+    box.appendChild(el("p", { class: "empty-note", text: "このグループのテスト履歴はまだありません。" }));
     return;
   }
   for (const h of recent) {
     const d = new Date(h.date);
     const dateStr = `${d.getFullYear()}/${d.getMonth() + 1}/${d.getDate()} ${d.getHours()}:${String(d.getMinutes()).padStart(2, "0")}`;
     const rate = h.total > 0 ? Math.round((h.correctCount / h.total) * 100) : 0;
-    box.appendChild(
-      el("div", { class: "history-row" }, [
-        el("div", { class: "history-date", text: `${dateStr}　${h.groupName || ""}` }),
-        el("div", { text: `出題 ${h.total}　正解 ${h.correctCount}　不正解 ${h.wrongCount}　正答率 ${rate}%` }),
-      ])
-    );
+
+    const head = el("div", { class: "history-date", text: dateStr + (h.interrupted ? "（中断）" : "") });
+    const stat = el("div", { text: `出題 ${h.total}　正解 ${h.correctCount}　不正解 ${h.wrongCount}　正答率 ${rate}%` });
+
+    // 対象範囲
+    const rangeParts = [];
+    if (Array.isArray(h.dictNames) && h.dictNames.length > 0) {
+      rangeParts.push("辞書：" + h.dictNames.join("、"));
+    }
+    if (h.levelMin != null && h.levelMax != null) {
+      rangeParts.push(`レベル ${h.levelMin}〜${h.levelMax}`);
+    }
+    if (h.memoryOnly) rangeParts.push("暗記必須のみ");
+    const rowChildren = [head, stat];
+    if (rangeParts.length > 0) {
+      rowChildren.push(el("div", { class: "history-range", text: rangeParts.join(" ／ ") }));
+    }
+
+    const row = el("div", { class: "history-row" }, rowChildren);
+
+    // 押すと間違えた単語リストを開閉
+    const wrongs = Array.isArray(h.wrongWords) ? h.wrongWords : [];
+    const detail = el("div", { class: "history-detail hidden" });
+    if (wrongs.length > 0) {
+      head.textContent = "▸ " + head.textContent;
+      row.style.cursor = "pointer";
+      const list = el("div", { class: "history-wrong-list" });
+      for (const w of wrongs) {
+        list.appendChild(el("div", { class: "history-wrong-item", text: `${w.word}　${(w.trans || "").slice(0, 40)}` }));
+      }
+      const btnCopy = el("button", {
+        class: "btn small",
+        text: "間違えた単語をコピー",
+        onclick: async (ev) => {
+          ev.stopPropagation();
+          const ok = await copyToClipboard(wrongs.map((w) => w.word).join("\n"));
+          btnCopy.textContent = ok ? "コピーしました！" : "コピーできませんでした";
+          setTimeout(() => (btnCopy.textContent = "間違えた単語をコピー"), 1500);
+        },
+      });
+      detail.appendChild(list);
+      detail.appendChild(btnCopy);
+      row.appendChild(detail);
+      row.addEventListener("click", () => {
+        const open = detail.classList.toggle("hidden");
+        head.textContent = (open ? "▸ " : "▾ ") + dateStr + (h.interrupted ? "（中断）" : "");
+      });
+    }
+    box.appendChild(row);
   }
 }
 
@@ -1334,13 +1405,9 @@ async function bulkApply(kind) {
       }
     }
   } else if (kind === "memory") {
+    // 暗記必須の変更では修正済フラグを付けない
     const v = Number($("bulkMemory").value);
-    for (const w of targets) {
-      if (w.memory !== v) {
-        w.memory = v;
-        touchModify(w);
-      }
-    }
+    for (const w of targets) w.memory = v;
   } else if (kind === "modify") {
     const v = Number($("bulkModify").value);
     for (const w of targets) w.modify = v;
@@ -1348,6 +1415,33 @@ async function bulkApply(kind) {
   await persistWords(targets);
   rerenderList();
   alert(`${targets.length} 語を変更しました。`);
+}
+
+// ペーストした見出語に一致する単語（グループ内）の暗記必須を一括オン
+async function applyMemoryPaste() {
+  const text = $("memPasteInput").value;
+  const tokens = text
+    .split(/\r?\n/)
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  if (tokens.length === 0) {
+    alert("見出語を1行に1つずつ貼り付けてください。");
+    return;
+  }
+  const set = new Set(tokens);
+  const matched = listWords.filter((w) => set.has(w.word));
+  const targets = matched.filter((w) => w.memory !== 1);
+  for (const w of targets) w.memory = 1; // 暗記必須の変更なので修正済フラグは付けない
+  if (targets.length > 0) {
+    await persistWords(targets);
+    rerenderList();
+  }
+  const matchedSpellings = new Set(matched.map((w) => w.word));
+  const notFound = tokens.filter((t) => !matchedSpellings.has(t));
+  alert(
+    `${targets.length} 語の暗記必須をオンにしました。\n` +
+      `（すでにオンだった一致単語：${matched.length - targets.length} 語、見つからなかった単語：${notFound.length} 件）`
+  );
 }
 
 function toggleSelectMode() {
@@ -1417,7 +1511,6 @@ function showWordEditForm() {
   body.appendChild(
     el("div", { class: "edit-field" }, [el("label", {}, [memCb, document.createTextNode(" 暗記必須（memory=1）")])])
   );
-  body.appendChild(el("p", { class: "hint", text: "保存すると、この単語に修正済（modify）フラグが自動で付きます。" }));
 
   const btnSave = el("button", { class: "btn primary full", text: "保存する" });
   const btnCancel = el("button", { class: "btn secondary full", text: "編集をやめる" });
@@ -1432,21 +1525,24 @@ function showWordEditForm() {
       alert("見出語（word）は空にできません。");
       return;
     }
-    const changed =
+    const newMemory = memCb.checked ? 1 : 0;
+    // 暗記必須（memory）以外の変更があったか
+    const changedNonMemory =
       newWord !== w.word ||
       inTrans.value !== w.trans ||
       inExp.value !== w.exp ||
       inPron.value !== w.pron ||
-      Number(levelSel.value) !== w.level ||
-      (memCb.checked ? 1 : 0) !== w.memory;
+      Number(levelSel.value) !== w.level;
+    const changed = changedNonMemory || newMemory !== w.memory;
     if (changed) {
       w.word = newWord;
       w.trans = inTrans.value;
       w.exp = inExp.value;
       w.pron = inPron.value;
       w.level = Number(levelSel.value);
-      w.memory = memCb.checked ? 1 : 0;
-      touchModify(w); // modifyフラグがなければ自動で付ける
+      w.memory = newMemory;
+      // 暗記必須だけの変更では修正済フラグを付けない
+      if (changedNonMemory) touchModify(w);
       await persistWords([w]);
       rerenderList();
     }
@@ -1484,6 +1580,7 @@ function setupListHandlers() {
   $("btnBulkLevel").addEventListener("click", () => bulkApply("level"));
   $("btnBulkMemory").addEventListener("click", () => bulkApply("memory"));
   $("btnBulkModify").addEventListener("click", () => bulkApply("modify"));
+  $("btnMemPaste").addEventListener("click", applyMemoryPaste);
 }
 
 /* =========================================================
@@ -1542,14 +1639,15 @@ function setupSetupHandlers() {
       alert("レベルの範囲が正しくありません（最小値が最大値より大きくなっています）。");
       return;
     }
-    await metaSet("lastTestSettings", {
-      levelMin: min,
-      levelMax: max,
-      memoryOnly: $("setupMemoryOnly").checked,
-    });
+    const memoryOnly = $("setupMemoryOnly").checked;
+    await metaSet("lastTestSettings", { levelMin: min, levelMax: max, memoryOnly });
     const words = getSetupFiltered();
     if (words.length === 0) return;
-    startMainTest(words);
+    const selectedIds = await getSelectedDictIds();
+    const dictNames = selectedIds
+      .map((id) => (dictsCache.find((d) => d.id === id) || {}).name)
+      .filter(Boolean);
+    startMainTest(words, { dictNames, levelMin: min, levelMax: max, memoryOnly });
   });
 }
 
@@ -1576,7 +1674,7 @@ test = {
 }
 */
 
-function startMainTest(words) {
+function startMainTest(words, settings) {
   test = {
     phase: "main",
     queue: shuffle(words),
@@ -1587,6 +1685,7 @@ function startMainTest(words) {
     wrongWords: [],
     remedialAll: [],
     remedialPool: [],
+    settings: settings || null,
   };
   showScreen("test");
   nextMainQuestion();
@@ -1635,9 +1734,9 @@ function renderQuestion() {
     $("testProgress").textContent = `${test.idx + 1} / ${test.queue.length}`;
   } else {
     $("testModeLabel").textContent = "補習テスト";
-    // 現在連続正解数 / (補習対象問題数 + 1)　※+1は現在出題中の問題を含む意図
+    // (現在連続正解数 + 1) / 補習対象問題数　※+1は現在出題中の問題を含む
     const cleared = test.remedialAll.length - test.remedialPool.length;
-    $("testProgress").textContent = `${cleared} / ${test.remedialAll.length + 1}`;
+    $("testProgress").textContent = `${cleared + 1} / ${test.remedialAll.length}`;
   }
   $("questionTrans").textContent = w.trans;
   const fb = $("feedback");
@@ -1770,16 +1869,22 @@ async function concludeMainTest(total, interrupted) {
   const rate = total > 0 ? Math.round((correct / total) * 100) : 0;
 
   const g = groupsCache.find((x) => x.id === currentGroupId);
+  const s = test.settings || {};
   if (total > 0) {
     try {
       await idb(
         store("history", "readwrite").add({
           date: Date.now(),
+          groupId: currentGroupId,
           groupName: g ? g.name : "",
           total,
           correctCount: correct,
           wrongCount: wrong,
           interrupted: !!interrupted,
+          dictNames: s.dictNames || [],
+          levelMin: s.levelMin != null ? s.levelMin : null,
+          levelMax: s.levelMax != null ? s.levelMax : null,
+          memoryOnly: !!s.memoryOnly,
           wrongWords: test.wrongWords.map((w) => ({ word: w.word, trans: w.trans })),
         })
       );
