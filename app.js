@@ -1557,6 +1557,9 @@ function setupSetupHandlers() {
    テスト本体（本テスト＋補習テスト）
    ========================================================= */
 
+// タッチ端末（スマホ・タブレット）の判定。trueのときは自動でキーボードを出さない。
+const IS_TOUCH = !!(window.matchMedia && window.matchMedia("(pointer: coarse)").matches);
+
 let test = null;
 /*
 test = {
@@ -1632,7 +1635,9 @@ function renderQuestion() {
     $("testProgress").textContent = `${test.idx + 1} / ${test.queue.length}`;
   } else {
     $("testModeLabel").textContent = "補習テスト";
-    $("testProgress").textContent = `残り ${test.remedialPool.length} 語`;
+    // 現在連続正解数 / (補習対象問題数 + 1)　※+1は現在出題中の問題を含む意図
+    const cleared = test.remedialAll.length - test.remedialPool.length;
+    $("testProgress").textContent = `${cleared} / ${test.remedialAll.length + 1}`;
   }
   $("questionTrans").textContent = w.trans;
   const fb = $("feedback");
@@ -1645,7 +1650,30 @@ function renderQuestion() {
   const input = $("answerInput");
   input.value = "";
   input.disabled = false;
-  input.focus();
+  // スマホでは自動でキーボードを出さない（出すと画面が下までスクロールしてしまうため）。
+  // PCでは入力欄に自動フォーカス（preventScrollでスクロールしない）。
+  if (!IS_TOUCH) input.focus({ preventScroll: true });
+}
+
+// 不正解時、正解と食い違う最初の1文字を選択状態にする
+function selectFirstMismatch(inputEl, answer) {
+  const typed = inputEl.value;
+  let i = 0;
+  const n = Math.min(typed.length, answer.length);
+  while (i < n && typed[i] === answer[i]) i++;
+  let end = i + 1;
+  if (i >= typed.length) {
+    // 入力が正解の先頭部分と一致していて短い場合は、末尾にカーソルを置く
+    i = typed.length;
+    end = typed.length;
+  } else if (end > typed.length) {
+    end = typed.length;
+  }
+  try {
+    inputEl.setSelectionRange(i, end);
+  } catch (e) {
+    inputEl.select();
+  }
 }
 
 function showAnswerPanel() {
@@ -1675,8 +1703,8 @@ function judge() {
       recordMiss();
     }
     const inp = $("answerInput");
-    inp.select();
-    inp.focus();
+    selectFirstMismatch(inp, w.word);
+    inp.focus({ preventScroll: true });
   }
 }
 
@@ -1716,7 +1744,8 @@ function settleQuestion(correctClean) {
   btnNext.classList.remove("hidden");
   btnNext.textContent =
     test.phase === "remedial" && test.remedialPool.length === 0 ? "補習完了へ →" : "次へ →";
-  btnNext.focus();
+  // スマホでは下部ボタンへフォーカスしない（画面が下までスクロールしてしまうため）
+  if (!IS_TOUCH) btnNext.focus({ preventScroll: true });
 }
 
 function goNext() {
@@ -1729,31 +1758,37 @@ function goNext() {
   }
 }
 
-async function finishMainTest() {
+function finishMainTest() {
+  concludeMainTest(test.queue.length, false);
+}
+
+async function concludeMainTest(total, interrupted) {
   if (test.finished) return; // 連打などによる二重実行を防ぐ
   test.finished = true;
-  const total = test.queue.length;
   const wrong = test.wrongWords.length;
-  const correct = total - wrong;
+  const correct = Math.max(0, total - wrong);
   const rate = total > 0 ? Math.round((correct / total) * 100) : 0;
 
   const g = groupsCache.find((x) => x.id === currentGroupId);
-  try {
-    await idb(
-      store("history", "readwrite").add({
-        date: Date.now(),
-        groupName: g ? g.name : "",
-        total,
-        correctCount: correct,
-        wrongCount: wrong,
-        wrongWords: test.wrongWords.map((w) => ({ word: w.word, trans: w.trans })),
-      })
-    );
-  } catch (e) {
-    console.error("履歴の保存に失敗:", e);
+  if (total > 0) {
+    try {
+      await idb(
+        store("history", "readwrite").add({
+          date: Date.now(),
+          groupName: g ? g.name : "",
+          total,
+          correctCount: correct,
+          wrongCount: wrong,
+          interrupted: !!interrupted,
+          wrongWords: test.wrongWords.map((w) => ({ word: w.word, trans: w.trans })),
+        })
+      );
+    } catch (e) {
+      console.error("履歴の保存に失敗:", e);
+    }
   }
 
-  $("resultTitle").textContent = "テスト結果";
+  $("resultTitle").textContent = interrupted ? "テスト中断（ここまでの結果）" : "テスト結果";
   renderResultStats(total, correct, wrong, rate);
   const wrongBox = $("resultWrongBox");
   const wrongList = $("resultWrongList");
@@ -1805,24 +1840,43 @@ function setupTestHandlers() {
   $("btnReveal").addEventListener("click", reveal);
   $("btnNext").addEventListener("click", goNext);
   $("answerInput").addEventListener("keydown", (e) => {
-    if (e.key === "Enter") {
-      e.preventDefault();
-      if (test && test.answered) goNext();
-      else judge();
-    }
+    if (e.key !== "Enter") return;
+    if (!test || test.answered) return; // 確定後の「次へ」は document 側に任せる
+    e.preventDefault();
+    // PCでは Shift+Enter で「答えを見る」、Enter で「判定する」
+    if (e.shiftKey) reveal();
+    else judge();
   });
   document.addEventListener("keydown", (e) => {
+    // 入力欄側で処理済み（判定・答えを見る）のEnterはここでは無視する。
+    // これにより、正解確定と同じEnterで次の問題へ飛んでしまうのを防ぐ。
+    if (e.defaultPrevented) return;
     if (e.key === "Enter" && test && test.answered && !$("screen-test").classList.contains("hidden")) {
       e.preventDefault();
       goNext();
     }
   });
-  $("btnQuitTest").addEventListener("click", () => {
-    const msg =
-      test && test.phase === "remedial"
-        ? "補習テストを中断しますか？（補習は最後までやるのがおすすめです）"
-        : "テストを中断しますか？";
-    if (confirm(msg)) {
+  $("btnQuitTest").addEventListener("click", async () => {
+    if (!test) {
+      showScreen("home");
+      return;
+    }
+    if (test.phase === "remedial") {
+      if (confirm("補習テストを中断しますか？（補習は最後までやるのがおすすめです）")) {
+        test = null;
+        showScreen("home");
+      }
+      return;
+    }
+    // 本テストの中断：ここまでの不正解があれば、その単語で補習テストができる
+    const engaged = test.answered || test.missedThis;
+    const answered = test.idx + (engaged ? 1 : 0);
+    const wrong = test.wrongWords.length;
+    if (wrong > 0) {
+      if (confirm(`テストを中断します。\nここまでの不正解 ${wrong} 語で補習テストができます。よろしいですか？`)) {
+        await concludeMainTest(answered, true);
+      }
+    } else if (confirm("テストを中断しますか？")) {
       test = null;
       showScreen("home");
     }
