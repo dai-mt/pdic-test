@@ -1315,6 +1315,14 @@ function applyListFilter() {
   clear($("wordList"));
   $("listCount").textContent = `${listFiltered.length} 語が見つかりました（全 ${listWords.length} 語中）`;
   renderMoreList();
+
+  // 一致する単語が無いときは「新規登録」ボタンを出す
+  const noResult = listFiltered.length === 0;
+  const btnNew = $("btnNewWord");
+  btnNew.classList.toggle("hidden", !noResult || listSelectMode);
+  if (noResult && !listSelectMode) {
+    btnNew.textContent = q !== "" ? `＋「${$("searchInput").value.trim()}」を新規登録` : "＋ 新しい単語を登録";
+  }
 }
 
 let listSelectMode = false;
@@ -1566,6 +1574,100 @@ function showWordEditForm() {
   });
 }
 
+async function addNewWord(rec, dictId) {
+  const tx = db.transaction(["dicts", "words"], "readwrite");
+  tx.objectStore("words").add({ dictId, ...rec });
+  const dictStore = tx.objectStore("dicts");
+  const dict = await idb(dictStore.get(dictId));
+  if (dict) {
+    dict.wordCount = (dict.wordCount || 0) + 1;
+    dictStore.put(dict);
+  }
+  await txDone(tx);
+}
+
+// 新規単語の登録フォーム（一致する単語が無いときに使う）
+function showNewWordForm(defaultWord) {
+  modalWord = null;
+  const body = $("modalBody");
+  clear(body);
+  body.appendChild(el("h3", { text: "単語を新規登録" }));
+  $("btnEditWord").classList.add("hidden");
+
+  if (dictsCache.length === 0) {
+    body.appendChild(
+      el("p", { class: "hint", text: "このグループには辞書ファイルがありません。先にインポートしてください。" })
+    );
+    $("modalOverlay").classList.remove("hidden");
+    return;
+  }
+
+  const mkText = (label, value) => {
+    const input = el("input", { type: "text", autocapitalize: "none", autocomplete: "off", spellcheck: "false" });
+    input.value = value || "";
+    body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: label }), input]));
+    return input;
+  };
+  const mkArea = (label) => {
+    const ta = el("textarea", {});
+    body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: label }), ta]));
+    return ta;
+  };
+
+  const inWord = mkText("見出語（word）※テストの正答になります", defaultWord || "");
+  const inTrans = mkArea("訳語（trans）※テストで問題として表示されます");
+  const inExp = mkArea("補足（exp）");
+  const levelSel = el("select", {});
+  for (let i = 0; i <= 15; i++) levelSel.appendChild(el("option", { value: String(i), text: String(i) }));
+  levelSel.value = "0";
+  body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: "レベル（level）" }), levelSel]));
+  const memCb = el("input", { type: "checkbox" });
+  body.appendChild(
+    el("div", { class: "edit-field" }, [el("label", {}, [memCb, document.createTextNode(" 暗記必須（memory=1）")])])
+  );
+  const dictSel = el("select", {});
+  for (const d of dictsCache) dictSel.appendChild(el("option", { value: String(d.id), text: d.name }));
+  body.appendChild(el("div", { class: "edit-field" }, [el("label", { text: "保存先の辞書ファイル" }), dictSel]));
+
+  const btnSave = el("button", { class: "btn primary full", text: "この内容で登録する" });
+  const btnCancel = el("button", { class: "btn secondary full", text: "やめる" });
+  body.appendChild(btnSave);
+  body.appendChild(btnCancel);
+
+  btnCancel.addEventListener("click", () => $("modalOverlay").classList.add("hidden"));
+  btnSave.addEventListener("click", async () => {
+    if (inWord.value.trim() === "") {
+      alert("見出語（word）を入力してください。");
+      return;
+    }
+    const dictId = Number(dictSel.value);
+    const rec = {
+      word: inWord.value,
+      trans: inTrans.value,
+      exp: inExp.value,
+      level: Number(levelSel.value),
+      memory: memCb.checked ? 1 : 0,
+      modify: 1, // 新規登録した単語には修正済フラグを自動で付ける
+      pron: "",
+      filelink: "",
+    };
+    btnSave.disabled = true;
+    try {
+      await addNewWord(rec, dictId);
+      await loadDicts();
+      $("modalOverlay").classList.add("hidden");
+      await openWordList();
+      const dictName = (dictsCache.find((d) => d.id === dictId) || {}).name || "";
+      alert(`「${rec.word}」を辞書「${dictName}」に登録しました。`);
+    } catch (e) {
+      alert("登録に失敗しました：" + e.message);
+      btnSave.disabled = false;
+    }
+  });
+
+  $("modalOverlay").classList.remove("hidden");
+}
+
 function setupListHandlers() {
   $("btnGoList").addEventListener("click", () => {
     if (listSelectMode) toggleSelectMode();
@@ -1597,6 +1699,7 @@ function setupListHandlers() {
   $("btnBulkMemory").addEventListener("click", () => bulkApply("memory"));
   $("btnBulkModify").addEventListener("click", () => bulkApply("modify"));
   $("btnMemPaste").addEventListener("click", applyMemoryPaste);
+  $("btnNewWord").addEventListener("click", () => showNewWordForm($("searchInput").value.trim()));
 }
 
 /* =========================================================
@@ -1826,8 +1929,8 @@ function judge() {
 function reveal() {
   if (!test || test.answered) return;
   const fb = $("feedback");
-  fb.textContent = "答えを見たので不正解扱いになります";
-  fb.className = "feedback ng";
+  fb.textContent = "";
+  fb.className = "feedback";
   if (!test.missedThis) {
     test.missedThis = true;
     recordMiss();
